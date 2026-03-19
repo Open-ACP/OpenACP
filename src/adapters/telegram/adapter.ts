@@ -6,6 +6,7 @@ import {
   type PermissionRequest,
   type NotificationMessage,
   type Session,
+  type AgentCommand,
 } from "../../core/index.js";
 import { createChildLogger } from "../../core/log.js";
 const log = createChildLogger({ module: "telegram" });
@@ -19,7 +20,11 @@ import {
 import {
   setupCommands,
   setupMenuCallbacks,
+  setupSkillCallbacks,
   buildMenuKeyboard,
+  buildSkillKeyboard,
+  clearSkillCallbacks,
+  STATIC_COMMANDS,
 } from "./commands.js";
 import { PermissionHandler } from "./permissions.js";
 import {
@@ -47,6 +52,7 @@ export class TelegramAdapter extends ChannelAdapter {
   private assistantSession: Session | null = null;
   private notificationTopicId!: number;
   private assistantTopicId!: number;
+  private skillMessages: Map<string, number> = new Map(); // sessionId → pinned messageId
 
   constructor(core: OpenACPCore, config: TelegramChannelConfig) {
     super(core, config as any);
@@ -72,6 +78,11 @@ export class TelegramAdapter extends ChannelAdapter {
       return prev(method, payload, signal);
     });
 
+    // Register static commands for Telegram autocomplete (scoped to this chat)
+    await this.bot.api.setMyCommands(STATIC_COMMANDS, {
+      scope: { type: "chat", chat_id: this.telegramConfig.chatId },
+    });
+
     // Middleware: only accept updates from configured chatId
     this.bot.use((ctx, next) => {
       const chatId = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat?.id;
@@ -94,7 +105,7 @@ export class TelegramAdapter extends ChannelAdapter {
     this.notificationTopicId = topics.notificationTopicId;
     this.assistantTopicId = topics.assistantTopicId;
 
-    // Setup permission handler
+    // Setup permission handler (instance only, callback registered later)
     this.permissionHandler = new PermissionHandler(
       this.bot,
       this.telegramConfig.chatId,
@@ -102,19 +113,21 @@ export class TelegramAdapter extends ChannelAdapter {
         (this.core as OpenACPCore).sessionManager.getSession(sessionId),
       (notification) => this.sendNotification(notification),
     );
-    this.permissionHandler.setupCallbackHandler();
 
-    // Setup commands and menu callbacks
-    setupCommands(
-      this.bot,
-      this.core as OpenACPCore,
-      this.telegramConfig.chatId,
-    );
+    // Callback registration order matters!
+    // Specific regex handlers first, catch-all last.
+    setupSkillCallbacks(this.bot, this.core as OpenACPCore);
     setupMenuCallbacks(
       this.bot,
       this.core as OpenACPCore,
       this.telegramConfig.chatId,
     );
+    setupCommands(
+      this.bot,
+      this.core as OpenACPCore,
+      this.telegramConfig.chatId,
+    );
+    this.permissionHandler.setupCallbackHandler();
 
     // Setup message routing
     this.setupRoutes();
@@ -330,6 +343,7 @@ export class TelegramAdapter extends ChannelAdapter {
         await this.finalizeDraft(sessionId);
         this.sessionDrafts.delete(sessionId);
         this.toolCallMessages.delete(sessionId);
+        await this.cleanupSkillCommands(sessionId);
         await this.bot.api.sendMessage(
           this.telegramConfig.chatId,
           `✅ <b>Done</b>`,
@@ -412,6 +426,107 @@ export class TelegramAdapter extends ChannelAdapter {
       Number(session.threadId),
       newName,
     );
+  }
+
+  async sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void> {
+    const session = (this.core as OpenACPCore).sessionManager.getSession(sessionId);
+    if (!session) return;
+    const threadId = Number(session.threadId);
+    if (!threadId) return;
+
+    // Empty commands → remove pinned message
+    if (commands.length === 0) {
+      await this.cleanupSkillCommands(sessionId);
+      return;
+    }
+
+    // Clear old callback entries before building new keyboard
+    clearSkillCallbacks(sessionId);
+
+    const keyboard = buildSkillKeyboard(sessionId, commands);
+    const text = "🛠 <b>Available commands:</b>";
+    const existingMsgId = this.skillMessages.get(sessionId);
+
+    if (existingMsgId) {
+      // Update existing pinned message
+      try {
+        await this.bot.api.editMessageText(
+          this.telegramConfig.chatId,
+          existingMsgId,
+          text,
+          { parse_mode: "HTML", reply_markup: keyboard },
+        );
+        return;
+      } catch {
+        // Message may have been deleted — fall through to create new
+      }
+    }
+
+    // Create and pin new message
+    try {
+      const msg = await this.bot.api.sendMessage(
+        this.telegramConfig.chatId,
+        text,
+        {
+          message_thread_id: threadId,
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+          disable_notification: true,
+        },
+      );
+      this.skillMessages.set(sessionId, msg.message_id);
+
+      await this.bot.api.pinChatMessage(this.telegramConfig.chatId, msg.message_id, {
+        disable_notification: true,
+      });
+    } catch (err) {
+      log.error({ err, sessionId }, "Failed to send skill commands");
+    }
+
+    // Update Telegram autocomplete with skill commands
+    await this.updateCommandAutocomplete(commands);
+  }
+
+  async cleanupSkillCommands(sessionId: string): Promise<void> {
+    const msgId = this.skillMessages.get(sessionId);
+    if (!msgId) return;
+
+    try {
+      await this.bot.api.editMessageText(
+        this.telegramConfig.chatId,
+        msgId,
+        "🛠 <i>Session ended</i>",
+        { parse_mode: "HTML" },
+      );
+      await this.bot.api.unpinChatMessage(this.telegramConfig.chatId, msgId);
+    } catch {
+      /* message may already be deleted */
+    }
+
+    this.skillMessages.delete(sessionId);
+    clearSkillCallbacks(sessionId);
+
+    // Reset autocomplete to static commands only
+    await this.updateCommandAutocomplete([]);
+  }
+
+  private async updateCommandAutocomplete(skillCommands: AgentCommand[]): Promise<void> {
+    // Telegram requires: 1-32 chars, lowercase a-z, 0-9, underscores only
+    const validSkills = skillCommands
+      .map((c) => ({
+        command: c.name.toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 32),
+        description: (c.description || c.name).replace(/\n/g, " ").slice(0, 256),
+      }))
+      .filter((c) => c.command.length > 0);
+    const all = [...STATIC_COMMANDS, ...validSkills];
+    try {
+      await this.bot.api.setMyCommands(all, {
+        scope: { type: "chat", chat_id: this.telegramConfig.chatId },
+      });
+      log.info({ count: all.length, skills: validSkills.length }, "Updated command autocomplete");
+    } catch (err) {
+      log.error({ err, commands: all }, "Failed to update command autocomplete");
+    }
   }
 
   private async finalizeDraft(sessionId: string): Promise<void> {

@@ -31,6 +31,12 @@ export interface NotificationMessage {
   deepLink?: string
 }
 
+export interface AgentCommand {
+  name: string
+  description: string
+  input?: unknown
+}
+
 export type AgentEvent =
   | { type: 'text'; content: string }
   | { type: 'thought'; content: string }
@@ -38,7 +44,7 @@ export type AgentEvent =
   | { type: 'tool_update'; id: string; status: string; content?: unknown; locations?: unknown }
   | { type: 'plan'; entries: PlanEntry[] }
   | { type: 'usage'; tokensUsed?: number; contextSize?: number; cost?: { amount: number; currency: string } }
-  | { type: 'commands_update'; commands: unknown[] }
+  | { type: 'commands_update'; commands: AgentCommand[] }
   | { type: 'session_end'; reason: string }
   | { type: 'error'; message: string }
 

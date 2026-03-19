@@ -4,6 +4,8 @@ import type { OpenACPCore } from "../../core/index.js";
 import { escapeHtml } from "./formatting.js";
 import { createSessionTopic } from "./topics.js";
 import { createChildLogger } from '../../core/log.js'
+import { nanoid } from 'nanoid'
+import type { AgentCommand } from '../../core/index.js'
 const log = createChildLogger({ module: 'telegram-commands' })
 
 export function setupCommands(
@@ -285,3 +287,67 @@ function botFromCtx(ctx: Context): Bot {
   // createSessionTopic only uses bot.api.createForumTopic
   return { api: ctx.api } as unknown as Bot;
 }
+
+// Skill command callback lookup map (short key → session + command)
+interface SkillCallbackEntry {
+  sessionId: string
+  commandName: string
+}
+
+const skillCallbackMap = new Map<string, SkillCallbackEntry>()
+
+export function buildSkillKeyboard(
+  sessionId: string,
+  commands: AgentCommand[],
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+  const sorted = [...commands].sort((a, b) => a.name.localeCompare(b.name))
+  for (let i = 0; i < sorted.length; i++) {
+    const cmd = sorted[i]
+    const key = nanoid(8)
+    skillCallbackMap.set(key, { sessionId, commandName: cmd.name })
+    keyboard.text(`/${cmd.name}`, `s:${key}`)
+    if (i % 2 === 1 && i < sorted.length - 1) {
+      keyboard.row()
+    }
+  }
+  return keyboard
+}
+
+export function clearSkillCallbacks(sessionId: string): void {
+  for (const [key, entry] of skillCallbackMap) {
+    if (entry.sessionId === sessionId) {
+      skillCallbackMap.delete(key)
+    }
+  }
+}
+
+export function setupSkillCallbacks(
+  bot: Bot,
+  core: OpenACPCore,
+): void {
+  bot.callbackQuery(/^s:/, async (ctx) => {
+    try {
+      await ctx.answerCallbackQuery()
+    } catch { /* expired */ }
+
+    const key = ctx.callbackQuery.data.slice(2)
+    const entry = skillCallbackMap.get(key)
+    if (!entry) return
+
+    const session = core.sessionManager.getSession(entry.sessionId)
+    if (!session || session.status !== 'active') return
+
+    await session.enqueuePrompt(`/${entry.commandName}`)
+  })
+}
+
+export const STATIC_COMMANDS = [
+  { command: 'new', description: 'Create new session' },
+  { command: 'new_chat', description: 'New chat, same agent & workspace' },
+  { command: 'cancel', description: 'Cancel current session' },
+  { command: 'status', description: 'Show status' },
+  { command: 'agents', description: 'List available agents' },
+  { command: 'help', description: 'Help' },
+  { command: 'menu', description: 'Show menu' },
+]

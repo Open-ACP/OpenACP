@@ -1,4 +1,4 @@
-import type { OutgoingMessage, PermissionRequest, NotificationMessage } from './types.js'
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentCommand } from './types.js'
 
 export interface ChannelConfig {
   enabled: boolean
@@ -19,4 +19,8 @@ export abstract class ChannelAdapter {
   // Session lifecycle on channel side
   abstract createSessionThread(sessionId: string, name: string): Promise<string>  // returns threadId
   abstract renameSessionThread(sessionId: string, newName: string): Promise<void>
+
+  // Skill commands — override in adapters that support dynamic commands
+  async sendSkillCommands(_sessionId: string, _commands: AgentCommand[]): Promise<void> {}
+  async cleanupSkillCommands(_sessionId: string): Promise<void> {}
 }

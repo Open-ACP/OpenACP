@@ -144,10 +144,6 @@ export class OpenACPCore {
         return { type: 'plan', text: '', metadata: { entries: event.entries } }
       case 'usage':
         return { type: 'usage', text: '', metadata: { tokensUsed: event.tokensUsed, contextSize: event.contextSize, cost: event.cost } }
-      case 'commands_update':
-        // Log but don't surface to user (Phase 3 feature)
-        log.debug({ commands: event.commands }, 'Commands update')
-        return { type: 'text', text: '' }  // no-op for now
       default:
         return { type: 'text', text: '' }
     }
@@ -171,6 +167,7 @@ export class OpenACPCore {
 
         case 'session_end':
           session.status = 'finished'
+          adapter.cleanupSkillCommands(session.id)
           adapter.sendMessage(session.id, { type: 'session_end', text: `Done (${event.reason})` })
           this.notificationManager.notify(session.channelId, {
             sessionId: session.id,
@@ -181,6 +178,7 @@ export class OpenACPCore {
           break
 
         case 'error':
+          adapter.cleanupSkillCommands(session.id)
           adapter.sendMessage(session.id, { type: 'error', text: event.message })
           this.notificationManager.notify(session.channelId, {
             sessionId: session.id,
@@ -192,6 +190,7 @@ export class OpenACPCore {
 
         case 'commands_update':
           log.debug({ commands: event.commands }, 'Commands available')
+          adapter.sendSkillCommands(session.id, event.commands)
           break
       }
     }
