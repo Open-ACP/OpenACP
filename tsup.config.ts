@@ -16,10 +16,13 @@ export default defineConfig({
   clean: true,
   outDir: 'dist-publish/dist',
   noExternal: ['@openacp/adapter-telegram'],
+  // All npm dependencies — not bundled, listed in published package.json
+  // Must include everything from core + telegram package.json deps (except workspace:*)
   external: [
     'grammy',
     'zod',
     'nanoid',
     '@agentclientprotocol/sdk',
+    '@inquirer/prompts',
   ],
 })
