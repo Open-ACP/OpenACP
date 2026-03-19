@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "openacp": "dist/main.js"
+    "openacp": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

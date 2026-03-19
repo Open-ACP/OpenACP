@@ -48,37 +48,6 @@ npm install -g @openacp/cli
 openacp
 ```
 
-On first run, OpenACP creates `~/.openacp/config.json` with defaults.
-
-### Configure
-
-Run once to generate the default config:
-
-```bash
-openacp
-```
-
-Edit `~/.openacp/config.json`:
-
-```json
-{
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "botToken": "YOUR_BOT_TOKEN",
-      "chatId": -100YOUR_CHAT_ID
-    }
-  },
-  "agents": {
-    "claude": {
-      "command": "claude-agent-acp",
-      "args": []
-    }
-  },
-  "defaultAgent": "claude"
-}
-```
-
 ### Setup Telegram
 
 1. Create a Supergroup in Telegram
@@ -92,15 +61,18 @@ Edit `~/.openacp/config.json`:
 openacp
 ```
 
-Or without global install:
+On first run (no config file), an **interactive setup wizard** walks you through:
 
-```bash
-openacp
-```
+1. **Telegram** — bot token + chat ID (validated against Telegram API)
+2. **Agents** — auto-detects installed agents, select which to enable
+3. **Workspace** — base directory for project workspaces
+4. **Security** — allowed users, session limits, timeout
+
+Config is saved to `~/.openacp/config.json`. See [docs/setup-guide.md](docs/setup-guide.md) for details.
 
 OpenACP will auto-create two topics in your group:
-- **📋 Notifications** — aggregated alerts with deep links
-- **🤖 Assistant** — AI helper for managing sessions
+- Notifications — aggregated alerts with deep links
+- Assistant — AI helper for managing sessions
 
 ## Usage
 
@@ -216,6 +188,7 @@ openacp/
         main.ts                → Entry point
         core.ts                → OpenACPCore orchestrator
         config.ts              → ConfigManager + Zod validation
+        setup.ts               → Interactive setup wizard
         session.ts             → Session (prompt queue, auto-name)
         agent-instance.ts      → ACP SDK integration
         channel.ts             → ChannelAdapter abstract class

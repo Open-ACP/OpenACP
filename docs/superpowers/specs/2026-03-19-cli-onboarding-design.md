@@ -58,7 +58,7 @@ Main module containing:
 
 - `runSetup(configManager: ConfigManager): Promise<boolean>` — orchestrates the entire setup flow. Uses `configManager.getConfigPath()` to determine where to write. Returns `true` if user wants to start immediately.
 - `setupTelegram(): Promise<Config['channels']['telegram']>` — collects and validates Telegram config. Returns Zod-inferred type. Automatically sets `enabled: true`. Sets `notificationTopicId` and `assistantTopicId` to `null` (auto-created on first start).
-- `setupAgents(): Promise<{ agents: Record<string, z.infer<typeof AgentSchema>>, defaultAgent: string }>` — detects and configures agents. Returns agents in Zod schema shape (command, args, env) keyed by name.
+- `setupAgents(): Promise<{ agents: Config['agents'], defaultAgent: string }>` — detects and configures agents. Returns agents in Zod-inferred config shape (command, args, env) keyed by name.
 - `setupWorkspace(): Promise<{ baseDir: string }>` — collects workspace path
 - `setupSecurity(): Promise<Config['security']>` — collects security settings. Allowed user IDs are parsed from comma-separated input into `string[]`.
 - `validateBotToken(token: string): Promise<{ ok: true, botName: string, botUsername: string } | { ok: false, error: string }>` — calls Telegram `getMe` API
@@ -91,6 +91,8 @@ Add methods:
 - `exists(): Promise<boolean>` — checks if config file exists without creating it or exiting
 - `getConfigPath(): string` — returns the resolved config path (respects `OPENACP_CONFIG_PATH` env var)
 - `writeNew(config: Config): Promise<void>` — writes a complete config object to the config path, creating the directory if needed. Unlike `save()` which reads-then-merges, this writes from scratch for first-time setup.
+
+Note: The existing `load()` method's "create default and exit" behavior remains as a fallback for non-interactive contexts (e.g., CI without TTY). When the interactive setup is present, `load()` will find the config file already written by `writeNew()` and proceed normally.
 
 ### Modified: `packages/core/package.json`
 

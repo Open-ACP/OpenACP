@@ -1,5 +1,7 @@
-import { execSync } from 'node:child_process'
-import { input, confirm, select, checkbox } from '@inquirer/prompts'
+import { execFileSync } from 'node:child_process'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { input, select } from '@inquirer/prompts'
 import type { Config, ConfigManager } from './config.js'
 
 // --- Telegram validation ---
@@ -47,22 +49,46 @@ export async function validateChatId(token: string, chatId: number): Promise<
 
 // --- Agent detection ---
 
+// Commands listed in priority order — first match wins per agent
 const KNOWN_AGENTS: Array<{ name: string; commands: string[] }> = [
-  { name: 'claude', commands: ['claude-agent-acp', 'claude', 'claude-code'] },
+  { name: 'claude', commands: ['claude-agent-acp', 'claude-code', 'claude'] },
   { name: 'codex', commands: ['codex'] },
 ]
+
+function commandExists(cmd: string): boolean {
+  // Check system PATH
+  try {
+    execFileSync('which', [cmd], { stdio: 'pipe' })
+    return true
+  } catch {
+    // not in PATH
+  }
+  // Check node_modules/.bin (walks up from cwd)
+  let dir = process.cwd()
+  while (true) {
+    const binPath = path.join(dir, 'node_modules', '.bin', cmd)
+    if (fs.existsSync(binPath)) return true
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return false
+}
 
 export async function detectAgents(): Promise<Array<{ name: string; command: string }>> {
   const found: Array<{ name: string; command: string }> = []
   for (const agent of KNOWN_AGENTS) {
+    // Find all available commands for this agent (PATH + node_modules/.bin)
+    const available: string[] = []
     for (const cmd of agent.commands) {
-      try {
-        execSync(`command -v ${cmd}`, { stdio: 'pipe' })
-        found.push({ name: agent.name, command: cmd })
-        break // found one for this agent, skip alternatives
-      } catch {
-        // not found, try next
+      if (commandExists(cmd)) {
+        available.push(cmd)
       }
+    }
+    if (available.length > 0) {
+      // Prefer claude-agent-acp over claude/claude-code (priority order)
+      const preferred = available[0]
+      found.push({ name: agent.name, command: preferred })
     }
   }
   return found
@@ -70,7 +96,7 @@ export async function detectAgents(): Promise<Array<{ name: string; command: str
 
 export async function validateAgentCommand(command: string): Promise<boolean> {
   try {
-    execSync(`command -v ${command}`, { stdio: 'pipe' })
+    execFileSync('which', [command], { stdio: 'pipe' })
     return true
   } catch {
     return false
@@ -79,7 +105,7 @@ export async function validateAgentCommand(command: string): Promise<boolean> {
 
 // --- Setup steps ---
 
-export async function setupTelegram(): Promise<NonNullable<Config['channels']['telegram']>> {
+export async function setupTelegram(): Promise<Config['channels'][string]> {
   console.log('\n--- Step 1: Telegram Setup ---\n')
 
   let botToken = ''
@@ -137,6 +163,9 @@ export async function setupTelegram(): Promise<NonNullable<Config['channels']['t
       break
     }
     console.log(`✗ Validation failed: ${result.error}`)
+    if (result.error.includes('must be a supergroup')) {
+      console.log('  Tip: Create a Supergroup in Telegram, then enable Topics in group settings.')
+    }
     const action = await select({
       message: 'What would you like to do?',
       choices: [
@@ -165,67 +194,18 @@ export async function setupAgents(): Promise<{ agents: Config['agents']; default
   const agents: Config['agents'] = {}
 
   if (detected.length > 0) {
-    console.log(`Found: ${detected.map(a => `${a.name} (${a.command})`).join(', ')}`)
-
-    const selected = await checkbox({
-      message: 'Which agents do you want to enable?',
-      choices: detected.map(a => ({
-        name: `${a.name} (${a.command})`,
-        value: a,
-        checked: true,
-      })),
-    })
-
-    if (selected.length === 0) {
-      console.log('No agents selected from detected list.')
-    }
-
-    for (const agent of selected) {
+    for (const agent of detected) {
       agents[agent.name] = { command: agent.command, args: [], env: {} }
     }
+    console.log(`Found: ${detected.map(a => `${a.name} (${a.command})`).join(', ')}`)
   } else {
-    console.log('No known agents detected in PATH.')
+    // Fallback to claude-agent-acp as default
+    agents['claude'] = { command: 'claude-agent-acp', args: [], env: {} }
+    console.log('No agents detected. Using default: claude (claude-agent-acp)')
   }
 
-  let addMore = Object.keys(agents).length === 0
-    ? true
-    : await confirm({ message: 'Add a custom agent?', default: false })
-
-  while (addMore) {
-    const name = await input({
-      message: 'Agent name (e.g. my-agent):',
-      validate: (val) => val.trim().length > 0 || 'Name cannot be empty',
-    })
-    const command = await input({
-      message: 'Agent command (binary name or path):',
-      validate: (val) => val.trim().length > 0 || 'Command cannot be empty',
-    })
-
-    const exists = await validateAgentCommand(command.trim())
-    if (!exists) {
-      console.log(`⚠ Warning: "${command.trim()}" not found in PATH. It may need to be installed.`)
-    }
-
-    agents[name.trim()] = { command: command.trim(), args: [], env: {} }
-    addMore = await confirm({ message: 'Add another agent?', default: false })
-  }
-
-  if (Object.keys(agents).length === 0) {
-    throw new Error('Setup cancelled: at least one agent is required')
-  }
-
-  const agentNames = Object.keys(agents)
-  let defaultAgent: string
-
-  if (agentNames.length === 1) {
-    defaultAgent = agentNames[0]
-    console.log(`Default agent: ${defaultAgent}`)
-  } else {
-    defaultAgent = await select({
-      message: 'Which agent should be the default?',
-      choices: agentNames.map(n => ({ name: n, value: n })),
-    })
-  }
+  const defaultAgent = Object.keys(agents)[0]
+  console.log(`Default agent: ${defaultAgent}`)
 
   return { agents, defaultAgent }
 }
@@ -297,9 +277,10 @@ function printConfigSummary(config: Config): void {
   console.log('\n--- Configuration Summary ---\n')
 
   console.log('Telegram:')
-  const tg = config.channels.telegram
+  const tg = config.channels.telegram as Record<string, any> | undefined
   if (tg) {
-    console.log(`  Bot token: ${tg.botToken.slice(0, 8)}...${tg.botToken.slice(-4)}`)
+    const token = String(tg.botToken || '')
+    console.log(`  Bot token: ${token.slice(0, 8)}...${token.slice(-4)}`)
     console.log(`  Chat ID: ${tg.chatId}`)
   }
 
@@ -310,12 +291,6 @@ function printConfigSummary(config: Config): void {
   }
 
   console.log(`\nWorkspace: ${config.workspace.baseDir}`)
-
-  console.log('\nSecurity:')
-  const sec = config.security
-  console.log(`  Allowed users: ${sec.allowedUserIds.length === 0 ? 'all' : sec.allowedUserIds.join(', ')}`)
-  console.log(`  Max concurrent sessions: ${sec.maxConcurrentSessions}`)
-  console.log(`  Session timeout: ${sec.sessionTimeoutMinutes} minutes`)
 }
 
 export async function runSetup(configManager: ConfigManager): Promise<boolean> {
@@ -325,7 +300,7 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
     const telegram = await setupTelegram()
     const { agents, defaultAgent } = await setupAgents()
     const workspace = await setupWorkspace()
-    const security = await setupSecurity()
+    const security = { allowedUserIds: [] as string[], maxConcurrentSessions: 5, sessionTimeoutMinutes: 60 }
 
     const config: Config = {
       channels: { telegram },
@@ -337,12 +312,6 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
 
     printConfigSummary(config)
 
-    const confirmed = await confirm({ message: '\nSave this configuration?', default: true })
-    if (!confirmed) {
-      console.log('Setup cancelled. No config file was created.')
-      return false
-    }
-
     try {
       await configManager.writeNew(config)
     } catch (writeErr) {
@@ -352,9 +321,9 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
       return false
     }
     console.log(`\n✓ Config saved to ${configManager.getConfigPath()}`)
+    console.log('Starting OpenACP...\n')
 
-    const shouldStart = await confirm({ message: 'Start OpenACP now?', default: true })
-    return shouldStart
+    return true
   } catch (err) {
     // Ctrl+C from inquirer throws ExitPromptError
     if ((err as Error).name === 'ExitPromptError') {

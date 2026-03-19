@@ -1,12 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { validateBotToken, validateChatId, detectAgents, validateAgentCommand } from '../setup.js'
 import * as child_process from 'node:child_process'
+import * as fs from 'node:fs'
 
 vi.mock('node:child_process', () => ({
-  execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }))
 
-const mockedExecSync = vi.mocked(child_process.execSync)
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>()
+  return { ...original, existsSync: vi.fn(() => false) }
+})
+
+import { validateBotToken, validateChatId, detectAgents, validateAgentCommand } from '../setup.js'
+
+const mockedExecFileSync = vi.mocked(child_process.execFileSync)
+const mockedExistsSync = vi.mocked(fs.existsSync)
 
 describe('validateBotToken', () => {
   afterEach(() => { vi.restoreAllMocks() })
@@ -93,8 +101,8 @@ describe('detectAgents', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it('returns detected agents from PATH', async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (typeof cmd === 'string' && cmd.includes('claude-agent-acp')) {
+    mockedExecFileSync.mockImplementation((_cmd: string, args?: readonly string[]) => {
+      if (args && args[0] === 'claude-agent-acp') {
         return Buffer.from('/usr/local/bin/claude-agent-acp\n')
       }
       throw new Error('not found')
@@ -105,9 +113,10 @@ describe('detectAgents', () => {
   })
 
   it('returns empty array when no agents found', async () => {
-    mockedExecSync.mockImplementation(() => {
+    mockedExecFileSync.mockImplementation(() => {
       throw new Error('not found')
     })
+    mockedExistsSync.mockReturnValue(false)
 
     const agents = await detectAgents()
     expect(agents).toEqual([])
@@ -118,14 +127,14 @@ describe('validateAgentCommand', () => {
   afterEach(() => { vi.restoreAllMocks() })
 
   it('returns true when command exists', async () => {
-    mockedExecSync.mockReturnValue(Buffer.from('/usr/bin/node\n'))
+    mockedExecFileSync.mockReturnValue(Buffer.from('/usr/bin/node\n'))
 
     const result = await validateAgentCommand('node')
     expect(result).toBe(true)
   })
 
   it('returns false when command does not exist', async () => {
-    mockedExecSync.mockImplementation(() => { throw new Error('not found') })
+    mockedExecFileSync.mockImplementation(() => { throw new Error('not found') })
 
     const result = await validateAgentCommand('nonexistent-bin')
     expect(result).toBe(false)

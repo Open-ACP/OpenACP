@@ -2,11 +2,14 @@
   "name": "openacp",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "openacp": "packages/core/dist/cli.js"
+  },
   "scripts": {
     "build": "pnpm -r build",
     "build:publish": "tsx scripts/build-publish.ts",
     "dev": "pnpm --filter @openacp/core dev",
-    "start": "node packages/core/dist/main.js"
+    "start": "node packages/core/dist/cli.js"
   },
   "packageManager": "pnpm@10.5.0",
   "engines": {
