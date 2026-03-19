@@ -1,5 +1,7 @@
 import { Bot } from 'grammy'
-import { ChannelAdapter, type OpenACPCore, type OutgoingMessage, type PermissionRequest, type NotificationMessage, type Session, log } from '../../core/index.js'
+import { ChannelAdapter, type OpenACPCore, type OutgoingMessage, type PermissionRequest, type NotificationMessage, type Session } from '../../core/index.js'
+import { createChildLogger } from '../../core/log.js'
+const log = createChildLogger({ module: 'telegram' })
 import type { TelegramChannelConfig } from './types.js'
 import { MessageDraft } from './streaming.js'
 import { ensureTopics, createSessionTopic, renameSessionTopic } from './topics.js'
@@ -28,7 +30,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
     // Global error handler — prevent unhandled errors from crashing the bot
     this.bot.catch((err) => {
-      log.error('Bot error:', err.message || err)
+      log.error({ err: err }, 'Telegram bot error')
     })
 
     // Ensure allowed_updates includes callback_query on every poll
@@ -79,7 +81,7 @@ export class TelegramAdapter extends ChannelAdapter {
     // Start bot polling
     this.bot.start({
       allowed_updates: ['message', 'callback_query'],
-      onStart: () => log.info('Telegram bot started'),
+      onStart: () => log.info({ chatId: this.telegramConfig.chatId }, 'Telegram bot started'),
     })
 
     // Spawn assistant (after bot is started so it can send messages)
@@ -90,7 +92,7 @@ export class TelegramAdapter extends ChannelAdapter {
         this.assistantTopicId,
       )
     } catch (err) {
-      log.error('Failed to spawn assistant:', err)
+      log.error({ err }, 'Failed to spawn assistant')
     }
   }
 
@@ -99,6 +101,7 @@ export class TelegramAdapter extends ChannelAdapter {
       await this.assistantSession.destroy()
     }
     await this.bot.stop()
+    log.info('Telegram bot stopped')
   }
 
   private setupRoutes(): void {
@@ -117,7 +120,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
       // Assistant topic → forward to assistant session (fire-and-forget)
       if (threadId === this.assistantTopicId) {
-        handleAssistantMessage(this.assistantSession, ctx.message.text).catch(err => log.error('Assistant error:', err))
+        handleAssistantMessage(this.assistantSession, ctx.message.text).catch(err => log.error({ err }, 'Assistant error'))
         return
       }
 
@@ -127,13 +130,14 @@ export class TelegramAdapter extends ChannelAdapter {
         threadId: String(threadId),
         userId: String(ctx.from.id),
         text: ctx.message.text,
-      }).catch(err => log.error('handleMessage error:', err))
+      }).catch(err => log.error({ err }, 'handleMessage error'))
     })
   }
 
   // --- ChannelAdapter implementations ---
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
+    log.debug({ sessionId, type: content.type }, 'Sending message to Telegram')
     const session = (this.core as OpenACPCore).sessionManager.getSession(sessionId)
     if (!session) return
     const threadId = Number(session.threadId)
@@ -226,12 +230,14 @@ export class TelegramAdapter extends ChannelAdapter {
   }
 
   async sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<void> {
+    log.info({ sessionId, requestId: request.id }, 'Permission request sent')
     const session = (this.core as OpenACPCore).sessionManager.getSession(sessionId)
     if (!session) return
     await this.permissionHandler.sendPermissionRequest(session, request)
   }
 
   async sendNotification(notification: NotificationMessage): Promise<void> {
+    log.info({ sessionId: notification.sessionId, type: notification.type }, 'Notification sent')
     if (!this.notificationTopicId) return
     const emoji: Record<string, string> = {
       completed: '✅', error: '❌', permission: '🔐', input_required: '💬',
@@ -249,6 +255,7 @@ export class TelegramAdapter extends ChannelAdapter {
   }
 
   async createSessionThread(sessionId: string, name: string): Promise<string> {
+    log.info({ sessionId, name }, 'Session topic created')
     return String(await createSessionTopic(this.bot, this.telegramConfig.chatId, name))
   }
 

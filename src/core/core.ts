@@ -5,7 +5,8 @@ import { NotificationManager } from './notification.js'
 import { ChannelAdapter } from './channel.js'
 import { Session } from './session.js'
 import type { IncomingMessage, AgentEvent, OutgoingMessage, PermissionRequest } from './types.js'
-import { log } from './log.js'
+import { createChildLogger } from './log.js'
+const log = createChildLogger({ module: 'core' })
 
 export class OpenACPCore {
   configManager: ConfigManager
@@ -55,16 +56,21 @@ export class OpenACPCore {
 
   async handleMessage(message: IncomingMessage): Promise<void> {
     const config = this.configManager.get()
+    log.debug({ channelId: message.channelId, threadId: message.threadId, userId: message.userId }, 'Incoming message')
 
     // Security: check allowed user IDs
     if (config.security.allowedUserIds.length > 0) {
-      if (!config.security.allowedUserIds.includes(message.userId)) return
+      if (!config.security.allowedUserIds.includes(message.userId)) {
+        log.warn({ userId: message.userId }, 'Rejected message from unauthorized user')
+        return
+      }
     }
 
     // Check concurrent session limit
     const activeSessions = this.sessionManager.listSessions()
       .filter(s => s.status === 'active' || s.status === 'initializing')
     if (activeSessions.length >= config.security.maxConcurrentSessions) {
+      log.warn({ userId: message.userId, currentCount: activeSessions.length, max: config.security.maxConcurrentSessions }, 'Session limit reached')
       const adapter = this.adapters.get(message.channelId)
       if (adapter) {
         await adapter.sendMessage('system', {
@@ -90,6 +96,7 @@ export class OpenACPCore {
   ): Promise<Session> {
     const config = this.configManager.get()
     const resolvedAgent = agentName || config.defaultAgent
+    log.info({ channelId, agentName: resolvedAgent }, 'New session request')
     const resolvedWorkspace = this.configManager.resolveWorkspace(
       workspacePath || config.agents[resolvedAgent]?.workingDirectory
     )
@@ -139,7 +146,7 @@ export class OpenACPCore {
         return { type: 'usage', text: '', metadata: { tokensUsed: event.tokensUsed, contextSize: event.contextSize, cost: event.cost } }
       case 'commands_update':
         // Log but don't surface to user (Phase 3 feature)
-        log.debug('Commands update:', event.commands)
+        log.debug({ commands: event.commands }, 'Commands update')
         return { type: 'text', text: '' }  // no-op for now
       default:
         return { type: 'text', text: '' }
@@ -184,7 +191,7 @@ export class OpenACPCore {
           break
 
         case 'commands_update':
-          log.debug('Commands available:', event.commands)
+          log.debug({ commands: event.commands }, 'Commands available')
           break
       }
     }

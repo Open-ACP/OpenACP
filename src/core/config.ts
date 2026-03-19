@@ -2,7 +2,8 @@ import { z } from 'zod'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { log } from './log.js'
+import { createChildLogger } from './log.js'
+const log = createChildLogger({ module: 'config' })
 
 const BaseChannelSchema = z.object({
   enabled: z.boolean().default(false),
@@ -18,6 +19,16 @@ const AgentSchema = z.object({
   env: z.record(z.string(), z.string()).default({}),
 })
 
+const LoggingSchema = z.object({
+  level: z.enum(['silent', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  logDir: z.string().default('~/.openacp/logs'),
+  maxFileSize: z.union([z.string(), z.number()]).default('10m'),
+  maxFiles: z.number().default(7),
+  sessionLogRetentionDays: z.number().default(30),
+}).default({})
+
+export type LoggingConfig = z.infer<typeof LoggingSchema>
+
 export const ConfigSchema = z.object({
   channels: z.record(z.string(), BaseChannelSchema),
   agents: z.record(z.string(), AgentSchema),
@@ -30,6 +41,7 @@ export const ConfigSchema = z.object({
     maxConcurrentSessions: z.number().default(5),
     sessionTimeoutMinutes: z.number().default(60),
   }).default({}),
+  logging: LoggingSchema,
 })
 
 export type Config = z.infer<typeof ConfigSchema>
@@ -76,7 +88,7 @@ export class ConfigManager {
     // 2. If config file doesn't exist, create default
     if (!fs.existsSync(this.configPath)) {
       fs.writeFileSync(this.configPath, JSON.stringify(DEFAULT_CONFIG, null, 2))
-      log.info(`Config created at ${this.configPath}`)
+      log.info({ configPath: this.configPath }, 'Config created')
       log.info('Please edit it with your Telegram bot token and chat ID, then restart.')
       process.exit(1)
     }
@@ -90,9 +102,9 @@ export class ConfigManager {
     // 5. Validate with Zod
     const result = ConfigSchema.safeParse(raw)
     if (!result.success) {
-      log.error('Config validation failed:')
+      log.error('Config validation failed')
       for (const issue of result.error.issues) {
-        log.error(`  ${issue.path.join('.')}: ${issue.message}`)
+        log.error({ path: issue.path.join('.'), message: issue.message }, 'Validation error')
       }
       process.exit(1)
     }
@@ -165,6 +177,20 @@ export class ConfigManager {
         // Convert chatId to number
         target[key] = key === 'chatId' ? Number(value) : value
       }
+    }
+
+    // Logging env var overrides
+    if (process.env.OPENACP_LOG_LEVEL) {
+      raw.logging = raw.logging || {}
+      ;(raw.logging as Record<string, unknown>).level = process.env.OPENACP_LOG_LEVEL
+    }
+    if (process.env.OPENACP_LOG_DIR) {
+      raw.logging = raw.logging || {}
+      ;(raw.logging as Record<string, unknown>).logDir = process.env.OPENACP_LOG_DIR
+    }
+    if (process.env.OPENACP_DEBUG && !process.env.OPENACP_LOG_LEVEL) {
+      raw.logging = raw.logging || {}
+      ;(raw.logging as Record<string, unknown>).level = 'debug'
     }
   }
 

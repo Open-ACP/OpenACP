@@ -3,7 +3,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createRequire } from 'node:module'
 import { PLUGINS_DIR } from './config.js'
-import { log } from './log.js'
+import { createChildLogger } from './log.js'
+const log = createChildLogger({ module: 'plugin-manager' })
 import type { ChannelAdapter } from './channel.js'
 
 export interface AdapterFactory {
@@ -21,16 +22,16 @@ function ensurePluginsDir(): void {
 
 export function installPlugin(packageName: string): void {
   ensurePluginsDir()
-  log.info(`Installing ${packageName}...`)
+  log.info({ packageName }, 'Installing plugin')
   execSync(`npm install ${packageName} --prefix "${PLUGINS_DIR}"`, { stdio: 'inherit' })
-  log.info(`${packageName} installed successfully.`)
+  log.info({ packageName }, 'Plugin installed successfully')
 }
 
 export function uninstallPlugin(packageName: string): void {
   ensurePluginsDir()
-  log.info(`Uninstalling ${packageName}...`)
+  log.info({ packageName }, 'Uninstalling plugin')
   execSync(`npm uninstall ${packageName} --prefix "${PLUGINS_DIR}"`, { stdio: 'inherit' })
-  log.info(`${packageName} uninstalled.`)
+  log.info({ packageName }, 'Plugin uninstalled')
 }
 
 export function listPlugins(): Record<string, string> {
@@ -49,13 +50,13 @@ export async function loadAdapterFactory(packageName: string): Promise<AdapterFa
     // Plugin must export `adapterFactory` or default export conforming to AdapterFactory
     const factory: AdapterFactory | undefined = mod.adapterFactory || mod.default
     if (!factory || typeof factory.createAdapter !== 'function') {
-      log.error(`Plugin ${packageName} does not export a valid AdapterFactory (needs .createAdapter())`)
+      log.error({ packageName }, 'Plugin does not export a valid AdapterFactory (needs .createAdapter())')
       return null
     }
     return factory
   } catch (err) {
-    log.error(`Failed to load plugin ${packageName}:`, err)
-    log.error(`Run: npx openacp install ${packageName}`)
+    log.error({ packageName, err }, 'Failed to load plugin')
+    log.error({ packageName }, 'Run: npx openacp install <packageName>')
     return null
   }
 }

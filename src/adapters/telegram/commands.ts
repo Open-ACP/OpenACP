@@ -3,6 +3,8 @@ import { InlineKeyboard } from "grammy";
 import type { OpenACPCore } from "../../core/index.js";
 import { escapeHtml } from "./formatting.js";
 import { createSessionTopic } from "./topics.js";
+import { createChildLogger } from '../../core/log.js'
+const log = createChildLogger({ module: 'telegram-commands' })
 
 export function setupCommands(
   bot: Bot,
@@ -83,6 +85,8 @@ async function handleNew(
   const args = matchStr.split(" ").filter(Boolean);
   const agentName = args[0];
   const workspace = args[1];
+
+  log.info({ userId: ctx.from?.id, agentName }, 'New session command')
 
   // Create topic first so threadId is ready before session events fire
   let threadId: number | undefined;
@@ -185,6 +189,7 @@ async function handleCancel(ctx: Context, core: OpenACPCore): Promise<void> {
     String(threadId),
   );
   if (session) {
+    log.info({ sessionId: session.id }, 'Cancel session command')
     await session.cancel();
     await ctx.reply("⛔ Session cancelled.", { parse_mode: "HTML" });
   }

@@ -4,11 +4,14 @@ import { nanoid } from 'nanoid'
 import type { PermissionRequest, NotificationMessage, Session } from '../../core/index.js'
 import { escapeHtml } from './formatting.js'
 import { buildDeepLink } from './topics.js'
+import { createChildLogger } from '../../core/log.js'
+const log = createChildLogger({ module: 'telegram-permissions' })
 
-// Stored pending permission callbacks: callbackKey → { sessionId, requestId }
+// Stored pending permission callbacks: callbackKey → { sessionId, requestId, options }
 interface PendingPermission {
   sessionId: string
   requestId: string
+  options: { id: string; isAllow: boolean }[]
 }
 
 export class PermissionHandler {
@@ -26,7 +29,11 @@ export class PermissionHandler {
 
     // Short callback key (Telegram 64-byte limit on callback_data)
     const callbackKey = nanoid(8)
-    this.pending.set(callbackKey, { sessionId: session.id, requestId: request.id })
+    this.pending.set(callbackKey, {
+      sessionId: session.id,
+      requestId: request.id,
+      options: request.options.map(o => ({ id: o.id, isAllow: o.isAllow })),
+    })
 
     // Build inline keyboard
     const keyboard = new InlineKeyboard()
@@ -75,6 +82,8 @@ export class PermissionHandler {
       }
 
       const session = this.getSession(pending.sessionId)
+      const isAllow = pending.options.find(o => o.id === optionId)?.isAllow ?? false
+      log.info({ requestId: pending.requestId, optionId, isAllow }, 'Permission responded')
       if (session?.pendingPermission?.requestId === pending.requestId) {
         session.pendingPermission.resolve(optionId)
         session.pendingPermission = undefined

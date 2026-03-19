@@ -3,7 +3,7 @@
 import { ConfigManager } from './core/config.js'
 import { OpenACPCore } from './core/core.js'
 import { loadAdapterFactory } from './core/plugin-manager.js'
-import { log } from './core/log.js'
+import { initLogger, shutdownLogger, cleanupOldSessionLogs, log } from './core/log.js'
 import { TelegramAdapter } from './adapters/telegram/index.js'
 
 let shuttingDown = false
@@ -22,7 +22,13 @@ export async function startServer() {
   // 2. Load config (validates with Zod)
   await configManager.load()
   const config = configManager.get()
-  log.info('Config loaded from', configManager.getConfigPath())
+  initLogger(config.logging)
+  log.info({ configPath: configManager.getConfigPath() }, 'Config loaded')
+
+  // Async cleanup of old session logs (non-blocking)
+  cleanupOldSessionLogs(config.logging.sessionLogRetentionDays).catch(err =>
+    log.warn({ err }, 'Session log cleanup failed')
+  )
 
   // 3. Create core
   const core = new OpenACPCore(configManager)
@@ -32,20 +38,22 @@ export async function startServer() {
     if (!channelConfig.enabled) continue
 
     if (channelName === 'telegram') {
-      core.registerAdapter('telegram', new TelegramAdapter(core, channelConfig))
-      log.info('Telegram adapter registered')
+      core.registerAdapter('telegram', new TelegramAdapter(core, channelConfig as any))
+      log.info({ adapter: 'telegram' }, 'Adapter registered')
     } else if (channelConfig.adapter) {
       // Plugin adapter
       const factory = await loadAdapterFactory(channelConfig.adapter)
       if (factory) {
         const adapter = factory.createAdapter(core, channelConfig)
         core.registerAdapter(channelName, adapter)
-        log.info(`${channelName} adapter registered (plugin: ${channelConfig.adapter})`)
+        log.info({ adapter: channelName, plugin: channelConfig.adapter }, 'Adapter registered')
       } else {
-        log.error(`Skipping channel "${channelName}" — adapter "${channelConfig.adapter}" failed to load`)
+        const name = channelName
+        const err = channelConfig.adapter
+        log.error({ adapter: name, err }, 'Failed to load adapter')
       }
     } else {
-      log.error(`Channel "${channelName}" has no built-in adapter. Set "adapter" field to a plugin package.`)
+      log.error({ adapter: channelName }, 'Channel has no built-in adapter; set "adapter" field to a plugin package')
     }
   }
 
@@ -58,22 +66,23 @@ export async function startServer() {
   await core.start()
 
   // 6. Log ready
-  const agents = Object.keys(config.agents).join(', ')
-  log.info(`OpenACP started. Agents: ${agents}`)
-  log.info('Press Ctrl+C to stop.')
+  const agents = Object.keys(config.agents)
+  log.info({ agents }, 'OpenACP started')
+  log.info('Press Ctrl+C to stop')
 
   // 7. Graceful shutdown
   const shutdown = async (signal: string) => {
     if (shuttingDown) return
     shuttingDown = true
-    log.info(`${signal} received. Shutting down...`)
+    log.info({ signal }, 'Signal received, shutting down')
 
     try {
       await core.stop()
     } catch (err) {
-      log.error('Error during shutdown:', err)
+      log.error({ err }, 'Error during shutdown')
     }
 
+    await shutdownLogger()
     process.exit(0)
   }
 
@@ -81,19 +90,19 @@ export async function startServer() {
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 
   process.on('uncaughtException', (err) => {
-    log.error('Uncaught exception:', err)
+    log.error({ err }, 'Uncaught exception')
   })
 
   process.on('unhandledRejection', (err) => {
-    log.error('Unhandled rejection:', err)
+    log.error({ err }, 'Unhandled rejection')
   })
 }
 
-// Direct execution for dev (node packages/core/dist/main.js)
+// Direct execution for dev (node dist/main.js)
 const isDirectExecution = process.argv[1]?.endsWith('main.js')
 if (isDirectExecution) {
   startServer().catch((err) => {
-    log.error('Fatal:', err)
+    log.error({ err }, 'Fatal error')
     process.exit(1)
   })
 }

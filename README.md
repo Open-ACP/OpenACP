@@ -181,28 +181,28 @@ Configure in `~/.openacp/config.json`:
 ## Project Structure
 
 ```
-openacp/
-  packages/
-    core/                      → @openacp/core
-      src/
-        main.ts                → Entry point
-        core.ts                → OpenACPCore orchestrator
-        config.ts              → ConfigManager + Zod validation
-        setup.ts               → Interactive setup wizard
-        session.ts             → Session (prompt queue, auto-name)
-        agent-instance.ts      → ACP SDK integration
-        channel.ts             → ChannelAdapter abstract class
-        types.ts               → Shared types
-    adapters/
-      telegram/                → @openacp/adapter-telegram
-        src/
-          adapter.ts           → TelegramAdapter
-          streaming.ts         → Real-time message streaming
-          commands.ts          → Bot commands
-          permissions.ts       → Permission inline buttons
-          assistant.ts         → AI assistant topic
-          formatting.ts        → Markdown → Telegram HTML
-          topics.ts            → Forum topic management
+src/
+  cli.ts                         → CLI entry point
+  main.ts                        → Server startup
+  index.ts                       → Public API exports
+  core/
+    core.ts                      → OpenACPCore orchestrator
+    config.ts                    → ConfigManager + Zod validation
+    setup.ts                     → Interactive setup wizard
+    session.ts                   → Session (prompt queue, auto-name)
+    agent-instance.ts            → ACP SDK integration
+    channel.ts                   → ChannelAdapter abstract class
+    plugin-manager.ts            → Plugin install/uninstall/load
+    types.ts                     → Shared types
+  adapters/
+    telegram/
+      adapter.ts                 → TelegramAdapter
+      streaming.ts               → Real-time message streaming
+      commands.ts                → Bot commands
+      permissions.ts             → Permission inline buttons
+      assistant.ts               → AI assistant topic
+      formatting.ts              → Markdown → Telegram HTML
+      topics.ts                  → Forum topic management
 ```
 
 ## Roadmap
@@ -217,10 +217,10 @@ See [docs/specs/01-roadmap.md](docs/specs/01-roadmap.md) for details.
 
 ## Adding a Channel Adapter
 
-Extend `ChannelAdapter` from `@openacp/core`:
+Extend `ChannelAdapter` from `@openacp/cli`:
 
 ```typescript
-import { ChannelAdapter } from '@openacp/core'
+import { ChannelAdapter } from '@openacp/cli'
 
 class MyAdapter extends ChannelAdapter {
   async start() { /* connect to platform */ }
@@ -245,7 +245,7 @@ pnpm build
 Run locally:
 
 ```bash
-node packages/core/dist/main.js
+pnpm start
 ```
 
 ## License

@@ -2,7 +2,8 @@ import { nanoid } from 'nanoid'
 import type { AgentInstance } from './agent-instance.js'
 import type { ChannelAdapter } from './channel.js'
 import type { SessionStatus } from './types.js'
-import { log } from './log.js'
+import { createChildLogger, createSessionLogger, type Logger } from './log.js'
+const moduleLog = createChildLogger({ module: 'session' })
 
 export class Session {
   id: string
@@ -18,6 +19,7 @@ export class Session {
   createdAt: Date = new Date()
   adapter?: ChannelAdapter  // Set by wireSessionEvents for renaming
   pendingPermission?: { requestId: string; resolve: (optionId: string) => void }
+  log: Logger
 
   constructor(opts: {
     id?: string
@@ -31,12 +33,14 @@ export class Session {
     this.agentName = opts.agentName
     this.workingDirectory = opts.workingDirectory
     this.agentInstance = opts.agentInstance
+    this.log = createSessionLogger(this.id, moduleLog)
+    this.log.info({ agentName: this.agentName }, 'Session created')
   }
 
   async enqueuePrompt(text: string): Promise<void> {
     if (this.promptRunning) {
       this.promptQueue.push(text)
-      log.debug(`Prompt queued for session ${this.id} (${this.promptQueue.length} in queue)`)
+      this.log.debug({ queueDepth: this.promptQueue.length }, 'Prompt queued')
       return
     }
     await this.runPrompt(text)
@@ -45,9 +49,12 @@ export class Session {
   private async runPrompt(text: string): Promise<void> {
     this.promptRunning = true
     this.status = 'active'
+    const promptStart = Date.now()
+    this.log.debug('Prompt execution started')
 
     try {
       await this.agentInstance.prompt(text)
+      this.log.info({ durationMs: Date.now() - promptStart }, 'Prompt execution completed')
 
       // Auto-name after first user prompt
       if (!this.name) {
@@ -55,7 +62,7 @@ export class Session {
       }
     } catch (err) {
       this.status = 'error'
-      log.error(`Prompt failed for session ${this.id}:`, err)
+      this.log.error({ err }, 'Prompt execution failed')
     } finally {
       this.promptRunning = false
 
@@ -81,6 +88,7 @@ export class Session {
         'Summarize this conversation in max 5 words for a topic title. Reply ONLY with the title, nothing else.'
       )
       this.name = title.trim().slice(0, 50)
+      this.log.info({ name: this.name }, 'Session auto-named')
 
       // Rename the topic on the channel
       if (this.adapter && this.name) {
@@ -95,10 +103,12 @@ export class Session {
 
   async cancel(): Promise<void> {
     this.status = 'cancelled'
+    this.log.info('Session cancelled')
     await this.agentInstance.cancel()
   }
 
   async destroy(): Promise<void> {
+    this.log.info('Session destroyed')
     await this.agentInstance.destroy()
   }
 }

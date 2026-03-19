@@ -5,15 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-pnpm install            # Install all workspace dependencies
-pnpm build              # Build all packages (tsc in each)
-pnpm start              # Run: node packages/core/dist/main.js
-pnpm dev                # Watch mode for @openacp/core only
+pnpm install            # Install dependencies
+pnpm build              # TypeScript compile (tsc)
+pnpm build:publish      # Bundle for npm publish (tsup → dist-publish/)
+pnpm start              # Run: node dist/cli.js
+pnpm dev                # Watch mode (tsc --watch)
+pnpm test               # Run tests (vitest)
 ```
-
-Build order matters: `@openacp/core` must build before `@openacp/adapter-telegram`. `pnpm build` handles this via recursive workspace build.
-
-No test framework or linter is configured yet.
 
 ## Architecture
 
@@ -23,43 +21,53 @@ OpenACP bridges AI coding agents to messaging platforms via the Agent Client Pro
 User (Telegram) → ChannelAdapter → OpenACPCore → Session → AgentInstance (ACP subprocess)
 ```
 
-### Monorepo Layout
+### Project Layout
 
-- `packages/core` (`@openacp/core`) — Orchestrator, session management, ACP client, config
-- `packages/adapters/telegram` (`@openacp/adapter-telegram`) — Telegram bot via grammY
+```
+src/
+  cli.ts              — CLI entry (start, install, uninstall, plugins, --version, --help)
+  main.ts             — Server startup, adapter registration
+  index.ts            — Public API exports
+  core/               — Core modules
+    config.ts         — Zod-validated config from ~/.openacp/config.json
+    core.ts           — OpenACPCore orchestrator
+    session.ts        — Session with prompt queue, auto-naming
+    agent-instance.ts — ACP subprocess client
+    channel.ts        — ChannelAdapter abstract base
+    plugin-manager.ts — Plugin install/uninstall/load from ~/.openacp/plugins/
+    setup.ts          — Interactive first-run setup
+  adapters/
+    telegram/         — Built-in Telegram adapter (grammY)
+```
 
 ### Core Abstractions
 
 **OpenACPCore** (`core.ts`) — Registers adapters, routes messages, creates sessions, wires agent events to adapters. Enforces security (allowedUserIds, maxConcurrentSessions).
 
-**Session** (`session.ts`) — Wraps an AgentInstance with a prompt queue (serial processing), auto-naming (asks agent to summarize after first prompt), and lifecycle management. Key fields: `threadId` (set by adapter after topic creation), `promptQueue`, `pendingPermission`.
+**Session** (`session.ts`) — Wraps an AgentInstance with a prompt queue (serial processing), auto-naming (asks agent to summarize after first prompt), and lifecycle management.
 
-**AgentInstance** (`agent-instance.ts`) — Spawns agent subprocess, implements full ACP `Client` interface (sessionUpdate, permissions, file I/O, terminal management). Resolves commands via node_modules/.bin inspection. Converts ACP events to `AgentEvent` types.
+**AgentInstance** (`agent-instance.ts`) — Spawns agent subprocess, implements full ACP Client interface. Converts ACP events to AgentEvent types.
 
-**ChannelAdapter** (`channel.ts`) — Abstract base. Implementations must handle: `sendMessage`, `sendPermissionRequest`, `sendNotification`, `createSessionThread`, `renameSessionThread`.
+**ChannelAdapter** (`channel.ts`) — Abstract base. Implementations must handle: sendMessage, sendPermissionRequest, sendNotification, createSessionThread, renameSessionThread.
 
-**ConfigManager** (`config.ts`) — Zod-validated config from `~/.openacp/config.json`. Supports env overrides: `OPENACP_TELEGRAM_BOT_TOKEN`, `OPENACP_TELEGRAM_CHAT_ID`, `OPENACP_DEFAULT_AGENT`, `OPENACP_DEBUG`.
-
-### Event Flow
-
-AgentInstance emits `AgentEvent`s → `OpenACPCore.wireSessionEvents()` converts to `OutgoingMessage` → adapter renders to platform. Permission requests use async resolve pattern: adapter sends buttons, stores resolve callback, user clicks, callback resolves.
+**ConfigManager** (`config.ts`) — Zod-validated config. Supports env overrides: `OPENACP_TELEGRAM_BOT_TOKEN`, `OPENACP_TELEGRAM_CHAT_ID`, `OPENACP_DEFAULT_AGENT`, `OPENACP_DEBUG`.
 
 ### Telegram Adapter Patterns
 
-- **Forum topics**: Each session gets its own topic. System topics: 📋 Notifications, 🤖 Assistant
-- **MessageDraft** (`streaming.ts`): Buffers text chunks, sends periodic batch updates to avoid message spam
-- **Callback routing**: Permission buttons use `p:` prefix, menu buttons use `m:` prefix. Must use `bot.callbackQuery(/^prefix/)` (not `bot.on('callback_query:data')`) to avoid blocking the middleware chain
-- **Native fetch required**: grammY must use `{ client: { fetch } }` to avoid ETIMEDOUT with node-fetch on Node 20
-- **Topic-first creation**: Create forum topic BEFORE `core.handleNewSession()` to prevent race condition where agent events fire before `threadId` is set
+- **Forum topics**: Each session gets its own topic. System topics: Notifications, Assistant
+- **MessageDraft** (`streaming.ts`): Buffers text chunks, sends periodic batch updates
+- **Callback routing**: Permission buttons use `p:` prefix, menu buttons use `m:` prefix. Must use `bot.callbackQuery(/^prefix/)` to avoid blocking the middleware chain
+- **Topic-first creation**: Create forum topic BEFORE `core.handleNewSession()` to prevent race condition
 
-## Config
+## npm Publishing
 
-Default location: `~/.openacp/config.json` (override with `OPENACP_CONFIG_PATH`).
+Published as `@openacp/cli` on npm. Users install with `npm install -g @openacp/cli`.
 
-Agents are defined as `{ command, args, env }` in the `agents` record. Command resolution tries: local node_modules → .bin wrapper → which → raw command.
+- `pnpm build:publish` bundles via tsup into `dist-publish/`
+- GitHub Action auto-publishes on tag push (`v*`)
+- Plugin system: `openacp install @openacp/adapter-discord` installs to `~/.openacp/plugins/`
 
 ## Conventions
 
 - ESM-only (`"type": "module"`), all imports use `.js` extension
 - TypeScript strict mode, target ES2022, NodeNext module resolution
-- Use `as never` instead of `as any` for type assertions

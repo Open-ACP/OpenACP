@@ -19,5 +19,8 @@ export default defineConfig({
     'nanoid',
     '@agentclientprotocol/sdk',
     '@inquirer/prompts',
+    'pino',
+    'pino-pretty',
+    'pino-roll',
   ],
 })

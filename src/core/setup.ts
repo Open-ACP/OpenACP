@@ -222,43 +222,6 @@ export async function setupWorkspace(): Promise<{ baseDir: string }> {
   return { baseDir: baseDir.trim() }
 }
 
-export async function setupSecurity(): Promise<Config['security']> {
-  console.log('\n--- Step 4: Security Setup ---\n')
-
-  const userIdsStr = await input({
-    message: 'Allowed Telegram user IDs (comma-separated, or leave empty to allow all):',
-    default: '',
-  })
-
-  const allowedUserIds = userIdsStr.trim()
-    ? userIdsStr.split(',').map(id => id.trim()).filter(id => id.length > 0)
-    : []
-
-  const maxConcurrentStr = await input({
-    message: 'Max concurrent sessions:',
-    default: '5',
-    validate: (val) => {
-      const n = Number(val)
-      return (!isNaN(n) && Number.isInteger(n) && n > 0) || 'Must be a positive integer'
-    },
-  })
-
-  const timeoutStr = await input({
-    message: 'Session timeout (minutes):',
-    default: '60',
-    validate: (val) => {
-      const n = Number(val)
-      return (!isNaN(n) && Number.isInteger(n) && n > 0) || 'Must be a positive integer'
-    },
-  })
-
-  return {
-    allowedUserIds,
-    maxConcurrentSessions: Number(maxConcurrentStr),
-    sessionTimeoutMinutes: Number(timeoutStr),
-  }
-}
-
 // --- Orchestrator ---
 
 function printWelcomeBanner(): void {
@@ -308,6 +271,7 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
       defaultAgent,
       workspace,
       security,
+      logging: { level: 'info', logDir: '~/.openacp/logs', maxFileSize: '10m', maxFiles: 7, sessionLogRetentionDays: 30 },
     }
 
     printConfigSummary(config)

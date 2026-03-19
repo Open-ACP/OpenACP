@@ -7,7 +7,8 @@ import type { Agent, Client, PromptResponse, PermissionOption as SdkPermissionOp
 import { nodeToWebWritable, nodeToWebReadable } from './streams.js'
 import { StderrCapture } from './stderr-capture.js'
 import type { AgentDefinition, AgentEvent, PermissionRequest } from './types.js'
-import { log } from './log.js'
+import { createChildLogger } from './log.js'
+const log = createChildLogger({ module: 'agent-instance' })
 
 /** Resolve an agent command to a directly executable form (avoids shell wrappers) */
 function resolveAgentCommand(cmd: string): { command: string; args: string[] } {
@@ -84,7 +85,8 @@ export class AgentInstance {
 
     // 1. Resolve command: find the actual JS entry point to avoid shell wrappers
     const resolved = resolveAgentCommand(agentDef.command)
-    log.debug(`Spawning agent "${agentDef.name}" → ${resolved.command} ${resolved.args.join(' ')}`)
+    log.debug({ agentName: agentDef.name, command: resolved.command, args: resolved.args }, 'Spawning agent')
+    const spawnStart = Date.now()
 
     // Spawn subprocess
     instance.child = spawn(resolved.command, [...resolved.args, ...agentDef.args], {
@@ -136,6 +138,7 @@ export class AgentInstance {
 
     // 7. Crash detection
     instance.child.on('exit', (code, signal) => {
+      log.info({ sessionId: instance.sessionId, exitCode: code, signal }, 'Agent process exited')
       if (code !== 0 && code !== null) {
         const stderr = instance.stderrCapture.getLastLines()
         instance.onSessionUpdate({
@@ -146,11 +149,10 @@ export class AgentInstance {
     })
 
     instance.connection.closed.then(() => {
-      // Connection closed — may be normal shutdown or crash
-      log.debug('ACP connection closed for', instance.agentName)
+      log.debug({ sessionId: instance.sessionId }, 'ACP connection closed')
     })
 
-    log.info(`Agent "${agentDef.name}" spawned with session ${response.sessionId}`)
+    log.info({ sessionId: response.sessionId, durationMs: Date.now() - spawnStart }, 'Agent spawn complete')
     return instance
   }
 
