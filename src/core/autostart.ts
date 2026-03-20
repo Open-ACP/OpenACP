@@ -31,7 +31,10 @@ export function generateLaunchdPlist(nodePath: string, cliPath: string, logDir: 
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>StandardOutPath</key>
   <string>${logFile}</string>
   <key>StandardErrorPath</key>

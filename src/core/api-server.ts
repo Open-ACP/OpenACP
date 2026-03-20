@@ -128,7 +128,31 @@ export class ApiServer {
       return
     }
 
-    const session = await this.core.handleNewSession('api', agent, workspace)
+    // Use the first registered adapter (e.g. Telegram) so API sessions appear in the channel
+    const [adapterId, adapter] = this.core.adapters.entries().next().value ?? [null, null]
+    const channelId = adapterId ?? 'api'
+
+    const session = await this.core.handleNewSession(channelId, agent, workspace)
+
+    // If an adapter is available, create a session thread (Telegram topic) and wire events
+    if (adapter) {
+      try {
+        const threadId = await adapter.createSessionThread(session.id, `🔄 ${session.agentName} — New Session`)
+        session.threadId = threadId
+        this.core.wireSessionEvents(session, adapter)
+      } catch (err) {
+        log.warn({ err, sessionId: session.id }, 'Failed to create session thread on adapter, running headless')
+      }
+    }
+
+    // If no adapter wired events (headless), auto-approve permissions
+    if (!adapter) {
+      session.agentInstance.onPermissionRequest = async (request) => {
+        const allowOption = request.options.find(o => o.isAllow)
+        log.debug({ sessionId: session.id, permissionId: request.id, option: allowOption?.id }, 'Auto-approving permission for API session')
+        return allowOption?.id ?? request.options[0]?.id ?? ''
+      }
+    }
 
     // Warmup in background so session moves from 'initializing' to 'active'
     session.warmup().catch(err => log.warn({ err, sessionId: session.id }, 'API session warmup failed'))

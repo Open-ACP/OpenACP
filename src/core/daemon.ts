@@ -6,6 +6,7 @@ import { expandHome } from './config.js'
 
 const DEFAULT_PID_PATH = path.join(os.homedir(), '.openacp', 'openacp.pid')
 const DEFAULT_LOG_DIR = path.join(os.homedir(), '.openacp', 'logs')
+const RUNNING_MARKER = path.join(os.homedir(), '.openacp', 'running')
 
 export function writePidFile(pidPath: string, pid: number): void {
   const dir = path.dirname(pidPath)
@@ -57,6 +58,9 @@ export function getStatus(pidPath: string = DEFAULT_PID_PATH): { running: boolea
 }
 
 export function startDaemon(pidPath: string = DEFAULT_PID_PATH, logDir?: string): { pid: number } | { error: string } {
+  // Mark as running so auto-start works on next boot
+  markRunning()
+
   // Check if already running
   if (isProcessRunning(pidPath)) {
     const pid = readPidFile(pidPath)!
@@ -87,6 +91,10 @@ export function startDaemon(pidPath: string = DEFAULT_PID_PATH, logDir?: string)
     return { error: 'Failed to spawn daemon process' }
   }
 
+  // PID file is written by the child process itself (in main.ts startServer)
+  // to avoid race conditions and ensure consistency with LaunchAgent/systemd starts.
+  // We still write it here as a fallback in case the child hasn't written it yet
+  // when the parent needs to report the PID.
   writePidFile(pidPath, child.pid)
   child.unref()
 
@@ -106,6 +114,8 @@ export function stopDaemon(pidPath: string = DEFAULT_PID_PATH): { stopped: boole
 
   try {
     process.kill(pid, 'SIGTERM')
+    // Remove running marker so auto-start won't restart on next boot
+    clearRunning()
     // PID file is cleaned up by the child process on SIGTERM (see main.ts shutdown handler).
     // Also remove here in case child crashes before cleanup.
     removePidFile(pidPath)
@@ -117,4 +127,20 @@ export function stopDaemon(pidPath: string = DEFAULT_PID_PATH): { stopped: boole
 
 export function getPidPath(): string {
   return DEFAULT_PID_PATH
+}
+
+/** Mark that the daemon should auto-start on boot */
+export function markRunning(): void {
+  fs.mkdirSync(path.dirname(RUNNING_MARKER), { recursive: true })
+  fs.writeFileSync(RUNNING_MARKER, '')
+}
+
+/** Remove running marker — daemon won't auto-start on boot */
+export function clearRunning(): void {
+  try { fs.unlinkSync(RUNNING_MARKER) } catch { /* ignore */ }
+}
+
+/** Check if the daemon was running before (should auto-start on boot) */
+export function shouldAutoStart(): boolean {
+  return fs.existsSync(RUNNING_MARKER)
 }

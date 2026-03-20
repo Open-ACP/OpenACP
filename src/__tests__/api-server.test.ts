@@ -11,6 +11,7 @@ describe('ApiServer', () => {
 
   const mockCore = {
     handleNewSession: vi.fn(),
+    wireSessionEvents: vi.fn(),
     sessionManager: {
       getSession: vi.fn(),
       listSessions: vi.fn(() => []),
@@ -24,6 +25,7 @@ describe('ApiServer', () => {
         security: { maxConcurrentSessions: 5 },
       })),
     },
+    adapters: new Map(),
   }
 
   beforeEach(() => {
@@ -83,7 +85,8 @@ describe('ApiServer', () => {
   })
 
   it('POST /api/sessions creates a session', async () => {
-    const mockSession = { id: 'abc123', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined) }
+    const mockAgentInstance = { onPermissionRequest: vi.fn() }
+    const mockSession = { id: 'abc123', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined), agentInstance: mockAgentInstance }
     mockCore.handleNewSession.mockResolvedValueOnce(mockSession)
     const port = await startServer()
 
@@ -101,10 +104,12 @@ describe('ApiServer', () => {
     expect(data.workspace).toBe('/tmp/ws')
     expect(mockCore.handleNewSession).toHaveBeenCalledWith('api', 'claude', undefined)
     expect(mockSession.warmup).toHaveBeenCalled()
+    // Verify auto-approve permission handler was wired
+    expect(mockAgentInstance.onPermissionRequest).toBeTypeOf('function')
   })
 
   it('POST /api/sessions with empty body uses defaults', async () => {
-    const mockSession = { id: 'def456', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined) }
+    const mockSession = { id: 'def456', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined), agentInstance: { onPermissionRequest: vi.fn() } }
     mockCore.handleNewSession.mockResolvedValueOnce(mockSession)
     const port = await startServer()
 

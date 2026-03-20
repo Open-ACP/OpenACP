@@ -3,8 +3,89 @@
 import { installPlugin, uninstallPlugin, listPlugins } from './core/plugin-manager.js'
 import { readApiPort, removeStalePortFile, apiCall } from './core/api-client.js'
 
+const NPM_PACKAGE = '@openacp/cli'
+
 const args = process.argv.slice(2)
 const command = args[0]
+
+function getCurrentVersion(): string {
+  try {
+    const { createRequire } = require('node:module') as typeof import('node:module')
+    const req = createRequire(import.meta.url)
+    const pkg = req('../package.json')
+    return pkg.version as string
+  } catch {
+    return '0.0.0-dev'
+  }
+}
+
+async function getLatestVersion(): Promise<string | null> {
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE}/latest`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { version?: string }
+    return data.version ?? null
+  } catch {
+    return null
+  }
+}
+
+function compareVersions(current: string, latest: string): -1 | 0 | 1 {
+  const a = current.split('.').map(Number)
+  const b = latest.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) < (b[i] ?? 0)) return -1
+    if ((a[i] ?? 0) > (b[i] ?? 0)) return 1
+  }
+  return 0
+}
+
+async function runUpdate(): Promise<boolean> {
+  const { spawn } = await import('node:child_process')
+  return new Promise((resolve) => {
+    const child = spawn('npm', ['install', '-g', `${NPM_PACKAGE}@latest`], {
+      stdio: 'inherit',
+      shell: true,
+    })
+    const onSignal = () => {
+      child.kill('SIGTERM')
+      resolve(false)
+    }
+    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal)
+    child.on('close', (code) => {
+      process.off('SIGINT', onSignal)
+      process.off('SIGTERM', onSignal)
+      resolve(code === 0)
+    })
+  })
+}
+
+async function checkAndPromptUpdate(): Promise<void> {
+  const current = getCurrentVersion()
+  if (current === '0.0.0-dev') return
+
+  const latest = await getLatestVersion()
+  if (!latest || compareVersions(current, latest) >= 0) return
+
+  console.log(`\x1b[33mUpdate available: v${current} → v${latest}\x1b[0m`)
+  const { confirm } = await import('@inquirer/prompts')
+  const yes = await confirm({
+    message: 'Update now before starting?',
+    default: true,
+  })
+  if (yes) {
+    const ok = await runUpdate()
+    if (ok) {
+      console.log(`\x1b[32m✓ Updated to v${latest}. Please re-run your command.\x1b[0m`)
+      process.exit(0)
+    } else {
+      console.error('\x1b[31mUpdate failed. Continuing with current version.\x1b[0m')
+    }
+  }
+}
 
 function printHelp(): void {
   console.log(`
@@ -18,6 +99,7 @@ Usage:
   openacp logs                         Tail daemon log file
   openacp config                       Edit configuration
   openacp reset                        Delete all data and start fresh
+  openacp update                       Update to latest version
   openacp install <package>            Install a plugin adapter
   openacp uninstall <package>          Uninstall a plugin adapter
   openacp plugins                      List installed plugins
@@ -26,10 +108,10 @@ Usage:
   openacp --help                       Show this help
 
 Runtime (requires running daemon):
-  openacp runtime new [agent]       Create a new session
-  openacp runtime cancel <id>       Cancel a session
-  openacp runtime status            Show active sessions
-  openacp runtime agents            List available agents
+  openacp runtime new [agent] [workspace]  Create a new session
+  openacp runtime cancel <id>              Cancel a session
+  openacp runtime status                   Show active sessions
+  openacp runtime agents                   List available agents
 
 Note: "openacp status" shows daemon process health.
       "openacp runtime status" shows active agent sessions.
@@ -106,7 +188,7 @@ async function main() {
       if (subCmd === 'new') {
         const agent = args[2]
         const workspaceIdx = args.indexOf('--workspace')
-        const workspace = workspaceIdx !== -1 ? args[workspaceIdx + 1] : undefined
+        const workspace = workspaceIdx !== -1 ? args[workspaceIdx + 1] : args[3]
         const body: Record<string, string> = {}
         if (agent) body.agent = agent
         if (workspace) body.workspace = workspace
@@ -168,7 +250,7 @@ async function main() {
       } else {
         console.error(`Unknown runtime command: ${subCmd || '(none)'}\n`)
         console.log('Usage:')
-        console.log('  openacp runtime new [agent]         Create a new session')
+        console.log('  openacp runtime new [agent] [workspace]  Create a new session')
         console.log('  openacp runtime cancel <id>         Cancel a session')
         console.log('  openacp runtime status              Show active sessions')
         console.log('  openacp runtime agents              List available agents')
@@ -186,6 +268,7 @@ async function main() {
   }
 
   if (command === 'start') {
+    await checkAndPromptUpdate()
     const { startDaemon, getPidPath } = await import('./core/daemon.js')
     const { ConfigManager } = await import('./core/config.js')
     const cm = new ConfigManager()
@@ -290,6 +373,28 @@ async function main() {
     return
   }
 
+  if (command === 'update') {
+    const current = getCurrentVersion()
+    const latest = await getLatestVersion()
+    if (!latest) {
+      console.error('Could not check for updates. Check your internet connection.')
+      process.exit(1)
+    }
+    if (compareVersions(current, latest) >= 0) {
+      console.log(`Already up to date (v${current})`)
+      return
+    }
+    console.log(`Update available: v${current} → v${latest}`)
+    const ok = await runUpdate()
+    if (ok) {
+      console.log(`\x1b[32m✓ Updated to v${latest}\x1b[0m`)
+    } else {
+      console.error('Update failed. Try manually: npm install -g @openacp/cli@latest')
+      process.exit(1)
+    }
+    return
+  }
+
   // Handle --daemon-child (internal flag for background server)
   if (command === '--daemon-child') {
     const { startServer } = await import('./main.js')
@@ -306,6 +411,9 @@ async function main() {
     printHelp()
     process.exit(1)
   }
+
+  // Check for updates before starting
+  await checkAndPromptUpdate()
 
   // Default: start server based on config runMode
   const { ConfigManager } = await import('./core/config.js')

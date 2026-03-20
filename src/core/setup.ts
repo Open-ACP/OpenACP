@@ -90,6 +90,54 @@ export async function validateChatId(
   }
 }
 
+export async function validateBotAdmin(
+  token: string,
+  chatId: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    // Get bot's own user ID
+    const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const meData = (await meRes.json()) as {
+      ok: boolean;
+      result?: { id: number };
+    };
+    if (!meData.ok || !meData.result) {
+      return { ok: false, error: "Could not retrieve bot info" };
+    }
+
+    const res = await fetch(
+      `https://api.telegram.org/bot${token}/getChatMember`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, user_id: meData.result.id }),
+      },
+    );
+    const data = (await res.json()) as {
+      ok: boolean;
+      result?: { status: string };
+      description?: string;
+    };
+    if (!data.ok || !data.result) {
+      return {
+        ok: false,
+        error: data.description || "Could not check bot membership",
+      };
+    }
+
+    const { status } = data.result;
+    if (status === "administrator" || status === "creator") {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: `Bot is "${status}" in this group. It must be an admin. Please promote the bot to admin in group settings.`,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
 // --- Chat ID auto-detection ---
 
 function promptManualChatId(): Promise<number> {
@@ -315,7 +363,46 @@ export async function setupTelegram(): Promise<Config["channels"][string]> {
     if (action === "skip") break;
   }
 
-  const chatId = await detectChatId(botToken);
+  let chatId: number;
+
+  while (true) {
+    chatId = await detectChatId(botToken);
+
+    // Validate bot can access this chat and it's a supergroup
+    const chatResult = await validateChatId(botToken, chatId);
+    if (!chatResult.ok) {
+      console.log(fail(chatResult.error));
+      console.log("");
+      console.log(`  ${c.bold}How to fix:${c.reset}`);
+      console.log(dim("  1. Make sure the bot is added to the group"));
+      console.log(dim("  2. The group must be a Supergroup (Group Settings → convert)"));
+      console.log(dim("  3. Send a message in the group after adding the bot"));
+      console.log("");
+      await input({ message: "Press Enter to try again..." });
+      continue;
+    }
+    console.log(
+      ok(
+        `Group: ${c.bold}${chatResult.title}${c.reset}${c.green}${chatResult.isForum ? " (Topics enabled)" : ""}`,
+      ),
+    );
+
+    // Check bot has admin privileges
+    const adminResult = await validateBotAdmin(botToken, chatId);
+    if (!adminResult.ok) {
+      console.log(fail(adminResult.error));
+      console.log("");
+      console.log(`  ${c.bold}How to fix:${c.reset}`);
+      console.log(dim("  1. Open the group in Telegram"));
+      console.log(dim("  2. Go to Group Settings → Administrators"));
+      console.log(dim("  3. Add the bot as an administrator"));
+      console.log("");
+      await input({ message: "Press Enter to check again..." });
+      continue;
+    }
+    console.log(ok("Bot has admin privileges"));
+    break;
+  }
 
   return {
     enabled: true,
