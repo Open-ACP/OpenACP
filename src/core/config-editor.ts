@@ -371,6 +371,30 @@ async function editRunMode(config: Config, updates: ConfigUpdates): Promise<void
   }
 }
 
+// --- Edit: API ---
+
+async function editApi(config: Config, updates: ConfigUpdates): Promise<void> {
+  const api = config.api ?? { port: 21420, host: '127.0.0.1' }
+
+  console.log(header('API'))
+  console.log(`  Port : ${api.port}`)
+  console.log(`  Host : ${api.host} ${dim('(localhost only)')}`)
+  console.log('')
+
+  const newPort = await input({
+    message: 'API port:',
+    default: String(api.port),
+    validate: (v) => {
+      const n = Number(v.trim())
+      if (!Number.isInteger(n) || n < 1 || n > 65535) return 'Must be a valid port (1-65535)'
+      return true
+    },
+  })
+
+  updates.api = { port: Number(newPort.trim()) }
+  console.log(ok(`API port set to ${newPort.trim()}`))
+}
+
 // --- Main Config Editor ---
 
 export async function runConfigEditor(configManager: ConfigManager): Promise<void> {
@@ -394,6 +418,7 @@ export async function runConfigEditor(configManager: ConfigManager): Promise<voi
           { name: 'Security', value: 'security' },
           { name: 'Logging', value: 'logging' },
           { name: 'Run Mode', value: 'runMode' },
+          { name: 'API', value: 'api' },
           { name: hasChanges ? 'Save & Exit' : 'Exit', value: 'exit' },
         ],
       })
@@ -414,6 +439,7 @@ export async function runConfigEditor(configManager: ConfigManager): Promise<voi
       else if (choice === 'security') await editSecurity(config, updates)
       else if (choice === 'logging') await editLogging(config, updates)
       else if (choice === 'runMode') await editRunMode(config, updates)
+      else if (choice === 'api') await editApi(config, updates)
     }
   } catch (err) {
     if ((err as Error).name === 'ExitPromptError') {
