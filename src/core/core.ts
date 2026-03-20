@@ -23,6 +23,7 @@ export class OpenACPCore {
   notificationManager: NotificationManager;
   adapters: Map<string, ChannelAdapter> = new Map();
   private sessionStore: SessionStore | null = null;
+  private resumeLocks: Map<string, Promise<Session | null>> = new Map();
 
   constructor(configManager: ConfigManager) {
     this.configManager = configManager;
@@ -116,11 +117,20 @@ export class OpenACPCore {
     }
 
     // Find session by thread
-    const session = this.sessionManager.getSessionByThread(
+    let session = this.sessionManager.getSessionByThread(
       message.channelId,
       message.threadId,
     );
+
+    // Lazy resume: try to restore session from store
+    if (!session) {
+      session = (await this.lazyResume(message)) ?? undefined;
+    }
+
     if (!session) return;
+
+    // Update activity timestamp
+    this.sessionManager.updateSessionActivity(session.id);
 
     // Forward to session
     await session.enqueuePrompt(message.text);
@@ -169,6 +179,78 @@ export class OpenACPCore {
       currentSession.agentName,
       currentSession.workingDirectory,
     );
+  }
+
+  // --- Lazy Resume ---
+
+  private async lazyResume(message: IncomingMessage): Promise<Session | null> {
+    if (!this.sessionStore) return null;
+
+    const lockKey = `${message.channelId}:${message.threadId}`;
+
+    // Check for existing resume in progress
+    const existing = this.resumeLocks.get(lockKey);
+    if (existing) return existing;
+
+    const record = this.sessionStore.findByPlatform(
+      message.channelId,
+      (p) => String(p.topicId) === message.threadId,
+    );
+    if (!record) return null;
+
+    // Don't resume cancelled/error sessions
+    if (record.status === "cancelled" || record.status === "error") return null;
+
+    const resumePromise = (async (): Promise<Session | null> => {
+      try {
+        const agentInstance = await this.agentManager.resume(
+          record.agentName,
+          record.workingDir,
+          record.agentSessionId,
+        );
+
+        const session = new Session({
+          id: record.sessionId,
+          channelId: record.channelId,
+          agentName: record.agentName,
+          workingDirectory: record.workingDir,
+          agentInstance,
+        });
+        session.threadId = message.threadId;
+        session.agentSessionId = agentInstance.sessionId;
+        session.status = "active";
+        session.name = record.name;
+
+        this.sessionManager.registerSession(session);
+
+        const adapter = this.adapters.get(message.channelId);
+        if (adapter) {
+          this.wireSessionEvents(session, adapter);
+        }
+
+        // Update store with new agentSessionId (may differ after resume)
+        await this.sessionStore!.save({
+          ...record,
+          agentSessionId: agentInstance.sessionId,
+          status: "active",
+          lastActiveAt: new Date().toISOString(),
+        });
+
+        log.info(
+          { sessionId: session.id, threadId: message.threadId },
+          "Lazy resume successful",
+        );
+        return session;
+      } catch (err) {
+        log.error({ err, record }, "Lazy resume failed");
+        return null;
+      } finally {
+        this.resumeLocks.delete(lockKey);
+      }
+    })();
+
+    this.resumeLocks.set(lockKey, resumePromise);
+    return resumePromise;
   }
 
   // --- Event Wiring ---
@@ -236,6 +318,7 @@ export class OpenACPCore {
 
         case "session_end":
           session.status = "finished";
+          this.sessionManager.updateSessionStatus(session.id, "finished");
           adapter.cleanupSkillCommands(session.id);
           adapter.sendMessage(session.id, {
             type: "session_end",
@@ -250,6 +333,7 @@ export class OpenACPCore {
           break;
 
         case "error":
+          this.sessionManager.updateSessionStatus(session.id, "error");
           adapter.cleanupSkillCommands(session.id);
           adapter.sendMessage(session.id, {
             type: "error",
