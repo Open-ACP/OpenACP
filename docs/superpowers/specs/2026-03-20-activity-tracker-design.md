@@ -79,19 +79,23 @@ ThinkingIndicator
 
 ```
 PlanCard
-  ├── send(entries)         — create message with checklist + [🛑 Cancel]
+  ├── send(entries)         — create message with progress bar + checklist + [🛑 Cancel]
   ├── update(entries)       — throttled edit-in-place (≥1.2s between edits)
   ├── finalize(cancelled?)  — remove inline keyboard, update final state
-  └── _buildText(entries)   — render: ◻ pending, ▶ in_progress, ✅ completed
+  └── _buildText(entries)   — render progress bar + checklist: ◻ ▶ ✅ ❌
 ```
+
+Progress bar: `▓▓▓▓▓▓░░░░ 60% · 3/5` — 10-char wide, percentage = completed/total.
 
 ### `UsageMessage`
 
 ```
 UsageMessage
-  ├── send(usage)           — sendMessage with usage stats
+  ├── send(usage)           — sendMessage with usage stats (progress bar + tokens + cost)
   └── deletePrevious()      — delete previous usage message at start of new prompt
 ```
+
+Format: `▓▓▓░░░░░░░ 28% context / 12k/42k tokens · $0.03`. Appends `⚠️` when context ≥ 85%.
 
 ### `formatToolCall` compact mode
 

@@ -122,15 +122,28 @@ ThinkingIndicator
 
 ### `PlanCard`
 
-Manages the plan checklist message with Cancel/Stop button.
+Manages the plan checklist message with Cancel/Stop button and a progress bar.
 
 ```
 PlanCard
-  ├── send(entries)            — create message with checklist + Cancel button
+  ├── send(entries)            — create message with progress bar + checklist + Cancel button
   ├── update(entries)          — edit-in-place (throttled ≥1.2s)
   ├── finalize(cancelled?)     — remove inline keyboard, update final state
-  └── _buildText(entries)      — render checklist: ◻ ▶ ✅ ❌
+  └── _buildText(entries)      — render progress bar + checklist: ◻ ▶ ✅ ❌
 ```
+
+**Progress bar format:**
+```
+📋 Plan
+▓▓▓▓▓▓░░░░ 60% · 3/5
+✅ Research gold prices
+✅ Verify with second source
+✅ Check exchange rates
+▶ Format data for user
+◻ Present final answer
+```
+
+Bar is 10 chars wide (`▓` filled, `░` empty). Percentage = completed / total. Updated on every `update()` call.
 
 ### `UsageMessage`
 
@@ -140,6 +153,20 @@ Rolling — always at most one per session at a time.
 UsageMessage
   ├── send(usage)              — sendMessage with usage stats
   └── deletePrevious()         — deleteMessage previous, called at start of new prompt
+```
+
+**Format:**
+```
+📊 Usage
+▓▓▓░░░░░░░ 28% context
+12k / 42k tokens · $0.03
+```
+
+**Warning at high usage (≥85%):** append `⚠️` to the percentage line:
+```
+📊 Usage
+▓▓▓▓▓▓▓▓▓░ 92% context ⚠️
+89k / 96k tokens · $0.15
 ```
 
 ### `formatToolCall` compact mode (existing file)
@@ -215,7 +242,8 @@ User: *"giá vàng hôm nay là bao nhiêu?"*
        (final response streams in)
 
        📊 Usage
-       ▓▓▓░░░░░░░ 28% context · 12k/42k tokens · $0.03
+       ▓▓▓░░░░░░░ 28% context
+       12k / 42k tokens · $0.03
 ```
 
 ---

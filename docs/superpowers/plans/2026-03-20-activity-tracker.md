@@ -286,11 +286,17 @@ class PlanCard {
     if (this.cancelled) {
       return '🛑 <i>Cancelled</i>'
     }
+    const total = this.entries.length
+    const completed = this.entries.filter((e) => e.status === 'completed').length
+    const pct = total > 0 ? Math.round((completed / total) * 100) : 0
+    const filled = Math.round(pct / 10)
+    const bar = '▓'.repeat(filled) + '░'.repeat(10 - filled)
+    const progressLine = `${bar} ${pct}% · ${completed}/${total}`
     const lines = this.entries.map((e) => {
       const icon = PLAN_ICON[e.status] ?? '◻'
       return `${icon} ${escapeHtml(e.content)}`
     })
-    return `📋 <b>Plan</b>\n${lines.join('\n')}`
+    return `📋 <b>Plan</b>\n${progressLine}\n${lines.join('\n')}`
   }
 
   private _buildKeyboard(): InstanceType<typeof InlineKeyboard> {
@@ -354,26 +360,24 @@ export class UsageMessage {
     contextSize?: number
     cost?: { amount: number; currency: string }
   }): Promise<void> {
-    const parts: string[] = []
+    const lines: string[] = []
     if (usage.contextSize != null && usage.tokensUsed != null) {
       const pct = Math.round((usage.tokensUsed / usage.contextSize) * 100)
       const filled = Math.min(10, Math.round(pct / 10))
       const bar = '▓'.repeat(filled) + '░'.repeat(10 - filled)
-      parts.push(`${bar} ${pct}% context`)
-      parts.push(
-        `${usage.tokensUsed.toLocaleString()} / ${usage.contextSize.toLocaleString()} tokens`,
-      )
+      const warning = pct >= 85 ? ' ⚠️' : ''
+      lines.push(`${bar} ${pct}% context${warning}`)
+      const tokenLine = `${usage.tokensUsed.toLocaleString()} / ${usage.contextSize.toLocaleString()} tokens`
+      lines.push(usage.cost ? `${tokenLine} · $${usage.cost.amount.toFixed(4)}` : tokenLine)
     } else if (usage.tokensUsed != null) {
-      parts.push(`${usage.tokensUsed.toLocaleString()} tokens`)
+      const tokenLine = `${usage.tokensUsed.toLocaleString()} tokens`
+      lines.push(usage.cost ? `${tokenLine} · $${usage.cost.amount.toFixed(4)}` : tokenLine)
     }
-    if (usage.cost) {
-      parts.push(`$${usage.cost.amount.toFixed(4)}`)
-    }
-    if (parts.length === 0) return
+    if (lines.length === 0) return
     try {
       const msg = await this.bot.api.sendMessage(
         this.chatId,
-        `📊 ${parts.join(' · ')}`,
+        `📊 Usage\n${lines.join('\n')}`,
         {
           message_thread_id: this.threadId,
           disable_notification: true,
