@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { ConfigManager } from '../config.js'
+import { ConfigManager } from '../core/config.js'
 
 // Mock @inquirer/prompts before importing setup
 vi.mock('@inquirer/prompts', () => ({
@@ -21,7 +21,7 @@ vi.mock('node:child_process', () => ({
 }))
 
 import { input } from '@inquirer/prompts'
-import { runSetup } from '../setup.js'
+import { runSetup } from '../core/setup.js'
 
 const mockedInput = vi.mocked(input)
 

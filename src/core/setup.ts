@@ -1,180 +1,322 @@
-import { execFileSync } from 'node:child_process'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
-import { input, select } from '@inquirer/prompts'
-import type { Config, ConfigManager } from './config.js'
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { input, select } from "@inquirer/prompts";
+import type { Config, ConfigManager } from "./config.js";
+
+// --- ANSI colors ---
+
+const c = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  cyan: "\x1b[36m",
+  white: "\x1b[37m",
+};
+
+const ok = (msg: string) =>
+  `${c.green}${c.bold}✓${c.reset} ${c.green}${msg}${c.reset}`;
+const warn = (msg: string) => `${c.yellow}⚠ ${msg}${c.reset}`;
+const fail = (msg: string) => `${c.red}✗ ${msg}${c.reset}`;
+const step = (n: number, title: string) =>
+  `\n${c.cyan}${c.bold}[${n}/3]${c.reset} ${c.bold}${title}${c.reset}\n`;
+const dim = (msg: string) => `${c.dim}${msg}${c.reset}`;
 
 // --- Telegram validation ---
 
-export async function validateBotToken(token: string): Promise<
-  { ok: true; botName: string; botUsername: string } | { ok: false; error: string }
+export async function validateBotToken(
+  token: string,
+): Promise<
+  | { ok: true; botName: string; botUsername: string }
+  | { ok: false; error: string }
 > {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`)
-    const data = await res.json() as { ok: boolean; result?: { first_name: string; username: string }; description?: string }
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const data = (await res.json()) as {
+      ok: boolean;
+      result?: { first_name: string; username: string };
+      description?: string;
+    };
     if (data.ok && data.result) {
-      return { ok: true, botName: data.result.first_name, botUsername: data.result.username }
+      return {
+        ok: true,
+        botName: data.result.first_name,
+        botUsername: data.result.username,
+      };
     }
-    return { ok: false, error: data.description || 'Invalid token' }
+    return { ok: false, error: data.description || "Invalid token" };
   } catch (err) {
-    return { ok: false, error: (err as Error).message }
+    return { ok: false, error: (err as Error).message };
   }
 }
 
-export async function validateChatId(token: string, chatId: number): Promise<
+export async function validateChatId(
+  token: string,
+  chatId: number,
+): Promise<
   { ok: true; title: string; isForum: boolean } | { ok: false; error: string }
 > {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId }),
-    })
-    const data = await res.json() as {
-      ok: boolean
-      result?: { title: string; type: string; is_forum?: boolean }
-      description?: string
-    }
+    });
+    const data = (await res.json()) as {
+      ok: boolean;
+      result?: { title: string; type: string; is_forum?: boolean };
+      description?: string;
+    };
     if (!data.ok || !data.result) {
-      return { ok: false, error: data.description || 'Invalid chat ID' }
+      return { ok: false, error: data.description || "Invalid chat ID" };
     }
-    if (data.result.type !== 'supergroup') {
-      return { ok: false, error: `Chat is "${data.result.type}", must be a supergroup` }
+    if (data.result.type !== "supergroup") {
+      return {
+        ok: false,
+        error: `Chat is "${data.result.type}", must be a supergroup`,
+      };
     }
-    return { ok: true, title: data.result.title, isForum: data.result.is_forum === true }
+    return {
+      ok: true,
+      title: data.result.title,
+      isForum: data.result.is_forum === true,
+    };
   } catch (err) {
-    return { ok: false, error: (err as Error).message }
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+// --- Chat ID auto-detection ---
+
+function promptManualChatId(): Promise<number> {
+  return input({
+    message: "Supergroup chat ID (e.g. -1001234567890):",
+    validate: (val) => {
+      const n = Number(val.trim());
+      if (isNaN(n) || !Number.isInteger(n)) return "Chat ID must be an integer";
+      return true;
+    },
+  }).then((val) => Number(val.trim()));
+}
+
+async function detectChatId(token: string): Promise<number> {
+  // Clear old updates
+  let lastUpdateId = 0;
+  try {
+    const clearRes = await fetch(
+      `https://api.telegram.org/bot${token}/getUpdates?offset=-1`,
+    );
+    const clearData = (await clearRes.json()) as {
+      ok: boolean;
+      result?: Array<{ update_id: number }>;
+    };
+    if (clearData.ok && clearData.result?.length) {
+      lastUpdateId = clearData.result[clearData.result.length - 1].update_id;
+    }
+  } catch {
+    // ignore
+  }
+
+  console.log("");
+  console.log(`  ${c.bold}If you don't have a supergroup yet:${c.reset}`);
+  console.log(dim("  1. Open Telegram → New Group → add your bot"));
+  console.log(dim("  2. Group Settings → convert to Supergroup"));
+  console.log(dim("  3. Enable Topics in group settings"));
+  console.log("");
+  console.log(`  ${c.bold}Then send "hi" in the group.${c.reset}`);
+  console.log(
+    dim(
+      `  Listening... press ${c.reset}${c.yellow}m${c.reset}${c.dim} to enter ID manually`,
+    ),
+  );
+  console.log("");
+
+  const MAX_ATTEMPTS = 120;
+  const POLL_INTERVAL = 1000;
+
+  // Listen for 'm' keypress to switch to manual
+  let cancelled = false;
+  const onKeypress = (data: Buffer) => {
+    const key = data.toString();
+    if (key === "m" || key === "M") {
+      cancelled = true;
+    }
+  };
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", onKeypress);
+  }
+
+  const cleanup = () => {
+    if (process.stdin.isTTY) {
+      process.stdin.removeListener("data", onKeypress);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    }
+  };
+
+  try {
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
+      if (cancelled) {
+        cleanup();
+        return promptManualChatId();
+      }
+
+      try {
+        const offset = lastUpdateId ? lastUpdateId + 1 : 0;
+        const res = await fetch(
+          `https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=1`,
+        );
+        const data = (await res.json()) as {
+          ok: boolean;
+          result?: Array<{
+            update_id: number;
+            message?: {
+              chat: { id: number; title?: string; type: string };
+            };
+            my_chat_member?: {
+              chat: { id: number; title?: string; type: string };
+            };
+          }>;
+        };
+
+        if (!data.ok || !data.result?.length) {
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+          continue;
+        }
+
+        const groups = new Map<number, string>();
+        for (const update of data.result) {
+          lastUpdateId = update.update_id;
+          const chat = update.message?.chat ?? update.my_chat_member?.chat;
+          if (chat && (chat.type === "supergroup" || chat.type === "group")) {
+            groups.set(chat.id, chat.title ?? String(chat.id));
+          }
+        }
+
+        if (groups.size === 1) {
+          const [id, title] = [...groups.entries()][0];
+          console.log(
+            ok(`Group detected: ${c.bold}${title}${c.reset}${c.green} (${id})`),
+          );
+          cleanup();
+          return id;
+        }
+
+        if (groups.size > 1) {
+          cleanup();
+          const choices = [...groups.entries()].map(([id, title]) => ({
+            name: `${title} (${id})`,
+            value: id,
+          }));
+          return select({
+            message: "Multiple groups found. Pick one:",
+            choices,
+          });
+        }
+      } catch {
+        // Network error, retry
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL));
+    }
+
+    console.log(warn("Timed out waiting for messages."));
+    cleanup();
+    return promptManualChatId();
+  } catch (err) {
+    cleanup();
+    throw err;
   }
 }
 
 // --- Agent detection ---
 
-// Commands listed in priority order — first match wins per agent
 const KNOWN_AGENTS: Array<{ name: string; commands: string[] }> = [
-  { name: 'claude', commands: ['claude-agent-acp', 'claude-code', 'claude'] },
-  { name: 'codex', commands: ['codex'] },
-]
+  { name: "claude", commands: ["claude-agent-acp"] },
+];
 
 function commandExists(cmd: string): boolean {
-  // Check system PATH
   try {
-    execFileSync('which', [cmd], { stdio: 'pipe' })
-    return true
+    execFileSync("which", [cmd], { stdio: "pipe" });
+    return true;
   } catch {
     // not in PATH
   }
-  // Check node_modules/.bin (walks up from cwd)
-  let dir = process.cwd()
+  let dir = process.cwd();
   while (true) {
-    const binPath = path.join(dir, 'node_modules', '.bin', cmd)
-    if (fs.existsSync(binPath)) return true
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
+    const binPath = path.join(dir, "node_modules", ".bin", cmd);
+    if (fs.existsSync(binPath)) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  return false
+  return false;
 }
 
-export async function detectAgents(): Promise<Array<{ name: string; command: string }>> {
-  const found: Array<{ name: string; command: string }> = []
+export async function detectAgents(): Promise<
+  Array<{ name: string; command: string }>
+> {
+  const found: Array<{ name: string; command: string }> = [];
   for (const agent of KNOWN_AGENTS) {
-    // Find all available commands for this agent (PATH + node_modules/.bin)
-    const available: string[] = []
+    const available: string[] = [];
     for (const cmd of agent.commands) {
       if (commandExists(cmd)) {
-        available.push(cmd)
+        available.push(cmd);
       }
     }
     if (available.length > 0) {
-      // Prefer claude-agent-acp over claude/claude-code (priority order)
-      const preferred = available[0]
-      found.push({ name: agent.name, command: preferred })
+      found.push({ name: agent.name, command: available[0] });
     }
   }
-  return found
+  return found;
 }
 
 export async function validateAgentCommand(command: string): Promise<boolean> {
   try {
-    execFileSync('which', [command], { stdio: 'pipe' })
-    return true
+    execFileSync("which", [command], { stdio: "pipe" });
+    return true;
   } catch {
-    return false
+    return false;
   }
 }
 
 // --- Setup steps ---
 
-export async function setupTelegram(): Promise<Config['channels'][string]> {
-  console.log('\n--- Step 1: Telegram Setup ---\n')
+export async function setupTelegram(): Promise<Config["channels"][string]> {
+  console.log(step(1, "Telegram Bot"));
 
-  let botToken = ''
-  let botUsername = ''
-  let botName = ''
+  let botToken = "";
 
   while (true) {
     botToken = await input({
-      message: 'Telegram bot token (from @BotFather):',
-      validate: (val) => val.trim().length > 0 || 'Token cannot be empty',
-    })
-    botToken = botToken.trim()
+      message: "Bot token (from @BotFather):",
+      validate: (val) => val.trim().length > 0 || "Token cannot be empty",
+    });
+    botToken = botToken.trim();
 
-    console.log('Validating bot token...')
-    const result = await validateBotToken(botToken)
+    const result = await validateBotToken(botToken);
     if (result.ok) {
-      botUsername = result.botUsername
-      botName = result.botName
-      console.log(`✓ Bot "${botName}" (@${botUsername}) connected`)
-      break
+      console.log(ok(`Connected to @${result.botUsername}`));
+      break;
     }
-    console.log(`✗ Validation failed: ${result.error}`)
+    console.log(fail(result.error));
     const action = await select({
-      message: 'What would you like to do?',
+      message: "What to do?",
       choices: [
-        { name: 'Re-enter token', value: 'retry' },
-        { name: 'Skip validation (use token as-is)', value: 'skip' },
+        { name: "Re-enter token", value: "retry" },
+        { name: "Use as-is (skip validation)", value: "skip" },
       ],
-    })
-    if (action === 'skip') break
+    });
+    if (action === "skip") break;
   }
 
-  let chatId = 0
+  console.log(step(2, "Group Chat"));
 
-  while (true) {
-    const chatIdStr = await input({
-      message: 'Telegram supergroup chat ID (e.g. -1001234567890):',
-      validate: (val) => {
-        const n = Number(val.trim())
-        if (isNaN(n) || !Number.isInteger(n)) return 'Chat ID must be an integer'
-        return true
-      },
-    })
-    chatId = Number(chatIdStr.trim())
-
-    console.log('Validating chat ID...')
-    const result = await validateChatId(botToken, chatId)
-    if (result.ok) {
-      if (!result.isForum) {
-        console.log(`⚠ Warning: "${result.title}" does not have Topics enabled.`)
-        console.log('  Please enable Topics in group settings → Topics → Enable.')
-      } else {
-        console.log(`✓ Connected to "${result.title}" (Topics enabled)`)
-      }
-      break
-    }
-    console.log(`✗ Validation failed: ${result.error}`)
-    if (result.error.includes('must be a supergroup')) {
-      console.log('  Tip: Create a Supergroup in Telegram, then enable Topics in group settings.')
-    }
-    const action = await select({
-      message: 'What would you like to do?',
-      choices: [
-        { name: 'Re-enter chat ID', value: 'retry' },
-        { name: 'Skip validation (use chat ID as-is)', value: 'skip' },
-      ],
-    })
-    if (action === 'skip') break
-  }
+  const chatId = await detectChatId(botToken);
 
   return {
     enabled: true,
@@ -182,88 +324,67 @@ export async function setupTelegram(): Promise<Config['channels'][string]> {
     chatId,
     notificationTopicId: null,
     assistantTopicId: null,
-  }
+  };
 }
 
-export async function setupAgents(): Promise<{ agents: Config['agents']; defaultAgent: string }> {
-  console.log('\n--- Step 2: Agent Setup ---\n')
-
-  console.log('Detecting agents in PATH...')
-  const detected = await detectAgents()
-
-  const agents: Config['agents'] = {}
+export async function setupAgents(): Promise<{
+  agents: Config["agents"];
+  defaultAgent: string;
+}> {
+  const detected = await detectAgents();
+  const agents: Config["agents"] = {};
 
   if (detected.length > 0) {
     for (const agent of detected) {
-      agents[agent.name] = { command: agent.command, args: [], env: {} }
+      agents[agent.name] = { command: agent.command, args: [], env: {} };
     }
-    console.log(`Found: ${detected.map(a => `${a.name} (${a.command})`).join(', ')}`)
   } else {
-    // Fallback to claude-agent-acp as default
-    agents['claude'] = { command: 'claude-agent-acp', args: [], env: {} }
-    console.log('No agents detected. Using default: claude (claude-agent-acp)')
+    agents["claude"] = { command: "claude-agent-acp", args: [], env: {} };
   }
 
-  const defaultAgent = Object.keys(agents)[0]
-  console.log(`Default agent: ${defaultAgent}`)
+  const defaultAgent = Object.keys(agents)[0];
+  const agentCmd = agents[defaultAgent].command;
+  console.log(
+    ok(`Agent: ${c.bold}${defaultAgent}${c.reset}${c.green} (${agentCmd})`),
+  );
 
-  return { agents, defaultAgent }
+  return { agents, defaultAgent };
 }
 
 export async function setupWorkspace(): Promise<{ baseDir: string }> {
-  console.log('\n--- Step 3: Workspace Setup ---\n')
+  console.log(step(3, "Workspace"));
 
   const baseDir = await input({
-    message: 'Workspace base directory:',
-    default: '~/openacp-workspace',
-    validate: (val) => val.trim().length > 0 || 'Path cannot be empty',
-  })
+    message: "Base directory for workspaces:",
+    default: "~/openacp-workspace",
+    validate: (val) => val.trim().length > 0 || "Path cannot be empty",
+  });
 
-  return { baseDir: baseDir.trim() }
+  return { baseDir: baseDir.trim().replace(/^['"]|['"]$/g, "") };
 }
 
 // --- Orchestrator ---
 
 function printWelcomeBanner(): void {
   console.log(`
-┌──────────────────────────────────────┐
-│                                      │
-│   Welcome to OpenACP!                │
-│                                      │
-│   Let's set up your configuration.   │
-│                                      │
-└──────────────────────────────────────┘
-`)
-}
-
-function printConfigSummary(config: Config): void {
-  console.log('\n--- Configuration Summary ---\n')
-
-  console.log('Telegram:')
-  const tg = config.channels.telegram as Record<string, any> | undefined
-  if (tg) {
-    const token = String(tg.botToken || '')
-    console.log(`  Bot token: ${token.slice(0, 8)}...${token.slice(-4)}`)
-    console.log(`  Chat ID: ${tg.chatId}`)
-  }
-
-  console.log('\nAgents:')
-  for (const [name, agent] of Object.entries(config.agents)) {
-    const marker = name === config.defaultAgent ? ' (default)' : ''
-    console.log(`  ${name}: ${agent.command}${marker}`)
-  }
-
-  console.log(`\nWorkspace: ${config.workspace.baseDir}`)
+${c.cyan}${c.bold}  ╔══════════════════════════════╗
+  ║        Welcome to OpenACP    ║
+  ╚══════════════════════════════╝${c.reset}
+`);
 }
 
 export async function runSetup(configManager: ConfigManager): Promise<boolean> {
-  printWelcomeBanner()
+  printWelcomeBanner();
 
   try {
-    const telegram = await setupTelegram()
-    const { agents, defaultAgent } = await setupAgents()
-    const workspace = await setupWorkspace()
-    const security = { allowedUserIds: [] as string[], maxConcurrentSessions: 5, sessionTimeoutMinutes: 60 }
+    const telegram = await setupTelegram();
+    const { agents, defaultAgent } = await setupAgents();
+    const workspace = await setupWorkspace();
+    const security = {
+      allowedUserIds: [] as string[],
+      maxConcurrentSessions: 5,
+      sessionTimeoutMinutes: 60,
+    };
 
     const config: Config = {
       channels: { telegram },
@@ -271,29 +392,37 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
       defaultAgent,
       workspace,
       security,
-      logging: { level: 'info', logDir: '~/.openacp/logs', maxFileSize: '10m', maxFiles: 7, sessionLogRetentionDays: 30 },
-    }
-
-    printConfigSummary(config)
+      logging: {
+        level: "info",
+        logDir: "~/.openacp/logs",
+        maxFileSize: "10m",
+        maxFiles: 7,
+        sessionLogRetentionDays: 30,
+      },
+    };
 
     try {
-      await configManager.writeNew(config)
+      await configManager.writeNew(config);
     } catch (writeErr) {
-      console.error(`\n✗ Failed to write config to ${configManager.getConfigPath()}`)
-      console.error(`  Error: ${(writeErr as Error).message}`)
-      console.error('  Check that you have write permissions to this path.')
-      return false
+      console.log(
+        fail(`Could not save config: ${(writeErr as Error).message}`),
+      );
+      return false;
     }
-    console.log(`\n✓ Config saved to ${configManager.getConfigPath()}`)
-    console.log('Starting OpenACP...\n')
 
-    return true
+    console.log("");
+    console.log(
+      ok(`Config saved to ${c.bold}${configManager.getConfigPath()}`),
+    );
+    console.log(ok("Starting OpenACP..."));
+    console.log("");
+
+    return true;
   } catch (err) {
-    // Ctrl+C from inquirer throws ExitPromptError
-    if ((err as Error).name === 'ExitPromptError') {
-      console.log('\nSetup cancelled.')
-      return false
+    if ((err as Error).name === "ExitPromptError") {
+      console.log(dim("\nSetup cancelled."));
+      return false;
     }
-    throw err
+    throw err;
   }
 }

@@ -11,7 +11,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...original, existsSync: vi.fn(() => false) }
 })
 
-import { validateBotToken, validateChatId, detectAgents, validateAgentCommand } from '../setup.js'
+import { validateBotToken, validateChatId, detectAgents, validateAgentCommand } from '../core/setup.js'
 
 const mockedExecFileSync = vi.mocked(child_process.execFileSync)
 const mockedExistsSync = vi.mocked(fs.existsSync)
