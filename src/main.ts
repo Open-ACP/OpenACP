@@ -82,6 +82,12 @@ export async function startServer() {
       log.error({ err }, 'Error during shutdown')
     }
 
+    // Clean up PID file if running as daemon
+    if (process.argv.includes('--daemon-child')) {
+      const { removePidFile, getPidPath } = await import('./core/daemon.js')
+      removePidFile(getPidPath())
+    }
+
     await shutdownLogger()
     process.exit(0)
   }
