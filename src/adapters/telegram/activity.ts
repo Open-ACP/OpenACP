@@ -128,6 +128,10 @@ export class UsageMessage {
     }
   }
 
+  getMsgId(): number | undefined {
+    return this.msgId
+  }
+
   async delete(): Promise<void> {
     if (!this.msgId) return
     const id = this.msgId
@@ -287,6 +291,10 @@ export class ActivityTracker {
     await this.usage.send(data)
   }
 
+  getUsageMsgId(): number | undefined {
+    return this.usage.getMsgId()
+  }
+
   async onComplete(): Promise<void> {
     if (this.hasPlanCard) {
       await this.planCard.finalize()
@@ -306,6 +314,7 @@ export class ActivityTracker {
   }
 
   destroy(): void {
+    this.thinking.dismiss()
     this.planCard.destroy()
   }
 

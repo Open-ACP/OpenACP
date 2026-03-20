@@ -496,14 +496,15 @@ export async function executeNewSession(
   chatId: number,
   agentName?: string,
   workspace?: string,
-): Promise<{ session: Session; threadId: number }> {
+): Promise<{ session: Session; threadId: number; firstMsgId: number }> {
   // Create topic with generic name first (same as original handleNew)
   const threadId = await createSessionTopic(bot, chatId, "🔄 New Session");
 
-  await bot.api.sendMessage(chatId, "⏳ Setting up session, please wait...", {
+  const setupMsg = await bot.api.sendMessage(chatId, "⏳ Setting up session, please wait...", {
     message_thread_id: threadId,
     parse_mode: "HTML",
   });
+  const firstMsgId = setupMsg.message_id;
 
   try {
     // core.handleNewSession() already wires events internally — do NOT call wireSessionEvents again
@@ -525,7 +526,7 @@ export async function executeNewSession(
     // Warm up model cache in background while user types
     session.warmup().catch((err) => log.error({ err }, "Warm-up error"));
 
-    return { session, threadId };
+    return { session, threadId, firstMsgId };
   } catch (err) {
     // Clean up orphaned topic on failure
     try {

@@ -536,7 +536,8 @@ export class TelegramAdapter extends ChannelAdapter {
           const sessionName = sess?.name || 'Session'
           const chatIdStr = String(this.telegramConfig.chatId)
           const numericId = chatIdStr.startsWith('-100') ? chatIdStr.slice(4) : chatIdStr.replace('-', '')
-          const deepLink = `https://t.me/c/${numericId}/${threadId}`
+          const usageMsgId = tracker.getUsageMsgId()
+          const deepLink = `https://t.me/c/${numericId}/${usageMsgId ?? threadId}`
           const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`
           this.sendQueue.enqueue(() =>
             this.bot.api.sendMessage(this.telegramConfig.chatId, text, {

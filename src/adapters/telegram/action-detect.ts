@@ -124,14 +124,14 @@ export function setupActionCallbacks(
     try {
       if (action.action === "new_session") {
         await ctx.answerCallbackQuery({ text: "⏳ Creating session..." });
-        const { threadId } = await executeNewSession(
+        const { threadId, firstMsgId } = await executeNewSession(
           bot,
           core,
           chatId,
           action.agent,
           action.workspace,
         );
-        const topicLink = `https://t.me/c/${String(chatId).replace("-100", "")}/${threadId}`;
+        const topicLink = `https://t.me/c/${String(chatId).replace("-100", "")}/${firstMsgId ?? threadId}`;
         const originalText = ctx.callbackQuery.message?.text ?? "";
         try {
           await ctx.editMessageText(

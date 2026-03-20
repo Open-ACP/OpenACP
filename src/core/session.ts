@@ -139,6 +139,7 @@ export class Session {
   }
 
   async cancel(): Promise<void> {
+    this.promptQueue = [];
     this.status = "cancelled";
     this.log.info("Session cancelled");
     await this.agentInstance.cancel();
