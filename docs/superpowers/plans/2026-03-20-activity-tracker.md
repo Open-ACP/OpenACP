@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Spec:** `docs/specs/features/activity-tracker.md`
+**Spec:** `docs/superpowers/specs/2026-03-20-activity-tracker.md`
 
 **Goal:** Replace the monolithic Working Card with purpose-specific, independent messages (ThinkingIndicator, PlanCard, UsageMessage) that avoid Telegram's 4096-char limit, eliminate race conditions, and preserve tool call history.
 
