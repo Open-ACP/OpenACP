@@ -5,6 +5,8 @@ import { NotificationManager } from './notification.js'
 import { ChannelAdapter } from './channel.js'
 import { Session } from './session.js'
 import type { IncomingMessage, AgentEvent, OutgoingMessage, PermissionRequest } from './types.js'
+import type { TunnelService } from '../tunnel/tunnel-service.js'
+import { extractFileInfo } from '../tunnel/extract-file-info.js'
 import { createChildLogger } from './log.js'
 const log = createChildLogger({ module: 'core' })
 
@@ -14,6 +16,7 @@ export class OpenACPCore {
   sessionManager: SessionManager
   notificationManager: NotificationManager
   adapters: Map<string, ChannelAdapter> = new Map()
+  tunnelService?: TunnelService
 
   constructor(configManager: ConfigManager) {
     this.configManager = configManager
@@ -130,22 +133,63 @@ export class OpenACPCore {
 
   // --- Event Wiring ---
 
-  private toOutgoingMessage(event: AgentEvent): OutgoingMessage {
+  private toOutgoingMessage(event: AgentEvent, session?: Session): OutgoingMessage {
     switch (event.type) {
       case 'text':
         return { type: 'text', text: event.content }
       case 'thought':
         return { type: 'thought', text: event.content }
-      case 'tool_call':
-        return { type: 'tool_call', text: event.name, metadata: { id: event.id, kind: event.kind, status: event.status, content: event.content, locations: event.locations } }
-      case 'tool_update':
-        return { type: 'tool_update', text: '', metadata: { id: event.id, status: event.status, content: event.content } }
+      case 'tool_call': {
+        const metadata: Record<string, unknown> = { id: event.id, kind: event.kind, status: event.status, content: event.content, locations: event.locations }
+        this.enrichWithViewerLinks(event, metadata, session)
+        return { type: 'tool_call', text: event.name, metadata }
+      }
+      case 'tool_update': {
+        const metadata: Record<string, unknown> = { id: event.id, status: event.status, content: event.content }
+        this.enrichWithViewerLinks(event, metadata, session)
+        return { type: 'tool_update', text: '', metadata }
+      }
       case 'plan':
         return { type: 'plan', text: '', metadata: { entries: event.entries } }
       case 'usage':
         return { type: 'usage', text: '', metadata: { tokensUsed: event.tokensUsed, contextSize: event.contextSize, cost: event.cost } }
       default:
         return { type: 'text', text: '' }
+    }
+  }
+
+  private enrichWithViewerLinks(
+    event: AgentEvent & { type: 'tool_call' | 'tool_update' },
+    metadata: Record<string, unknown>,
+    session?: Session,
+  ): void {
+    if (!this.tunnelService || !session) return
+
+    const name = 'name' in event ? (event.name || '') : ''
+    const kind = 'kind' in event ? event.kind : undefined
+
+    log.debug({ name, kind, status: event.status, hasContent: !!event.content }, 'enrichWithViewerLinks: inspecting event')
+
+    const fileInfo = extractFileInfo(name, kind, event.content)
+    if (!fileInfo) return
+
+    log.info({ name, kind, filePath: fileInfo.filePath, hasOldContent: !!fileInfo.oldContent }, 'enrichWithViewerLinks: extracted file info')
+
+    const store = this.tunnelService.getStore()
+    const viewerLinks: Record<string, string> = {}
+
+    // For edits/writes with diff data (oldText + newText)
+    if (fileInfo.oldContent) {
+      const id = store.storeDiff(session.id, fileInfo.filePath, fileInfo.oldContent, fileInfo.content, session.workingDirectory)
+      if (id) viewerLinks.diff = this.tunnelService.diffUrl(id)
+    }
+
+    // Always store as file view (new file creation or read)
+    const id = store.storeFile(session.id, fileInfo.filePath, fileInfo.content, session.workingDirectory)
+    if (id) viewerLinks.file = this.tunnelService.fileUrl(id)
+
+    if (Object.keys(viewerLinks).length > 0) {
+      metadata.viewerLinks = viewerLinks
     }
   }
 
@@ -162,7 +206,7 @@ export class OpenACPCore {
         case 'tool_update':
         case 'plan':
         case 'usage':
-          adapter.sendMessage(session.id, this.toOutgoingMessage(event))
+          adapter.sendMessage(session.id, this.toOutgoingMessage(event, session))
           break
 
         case 'session_end':

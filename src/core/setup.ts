@@ -399,6 +399,7 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
         maxFiles: 7,
         sessionLogRetentionDays: 30,
       },
+      tunnel: { enabled: false, port: 3100, provider: 'cloudflare', options: {}, storeTtlMinutes: 60, auth: { enabled: false } },
     };
 
     try {

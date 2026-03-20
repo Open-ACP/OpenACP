@@ -98,7 +98,7 @@ function truncateContent(text: string, maxLen = 3800): string {
   return text.slice(0, maxLen) + '\n… (truncated)'
 }
 
-export function formatToolCall(tool: { id: string; name?: string; kind?: string; status?: string; content?: unknown }): string {
+export function formatToolCall(tool: { id: string; name?: string; kind?: string; status?: string; content?: unknown; viewerLinks?: { file?: string; diff?: string } }): string {
   const si = STATUS_ICON[tool.status || ''] || '🔧'
   const ki = KIND_ICON[tool.kind || ''] || '🛠️'
   let text = `${si} ${ki} <b>${escapeHtml(tool.name || 'Tool')}</b>`
@@ -106,10 +106,11 @@ export function formatToolCall(tool: { id: string; name?: string; kind?: string;
   if (details) {
     text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
   }
+  text += formatViewerLinks(tool.viewerLinks)
   return text
 }
 
-export function formatToolUpdate(update: { id: string; name?: string; kind?: string; status: string; content?: unknown }): string {
+export function formatToolUpdate(update: { id: string; name?: string; kind?: string; status: string; content?: unknown; viewerLinks?: { file?: string; diff?: string } }): string {
   const si = STATUS_ICON[update.status] || '🔧'
   const ki = KIND_ICON[update.kind || ''] || '🛠️'
   const name = update.name || 'Tool'
@@ -118,6 +119,15 @@ export function formatToolUpdate(update: { id: string; name?: string; kind?: str
   if (details) {
     text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
   }
+  text += formatViewerLinks(update.viewerLinks)
+  return text
+}
+
+function formatViewerLinks(links?: { file?: string; diff?: string }): string {
+  if (!links) return ''
+  let text = ''
+  if (links.file) text += `\n📄 <a href="${escapeHtml(links.file)}">View file</a>`
+  if (links.diff) text += `\n📝 <a href="${escapeHtml(links.diff)}">View diff</a>`
   return text
 }
 
