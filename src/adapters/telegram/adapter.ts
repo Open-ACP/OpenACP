@@ -39,6 +39,11 @@ import {
   formatPlan,
   formatUsage,
 } from "./formatting.js";
+import {
+  detectAction,
+  storeAction,
+  buildActionKeyboard,
+} from "./action-detect.js";
 
 export class TelegramAdapter extends ChannelAdapter {
   private bot!: Bot;
@@ -595,9 +600,28 @@ export class TelegramAdapter extends ChannelAdapter {
 
   private async finalizeDraft(sessionId: string): Promise<void> {
     const draft = this.sessionDrafts.get(sessionId);
-    if (draft) {
-      await draft.finalize();
-      this.sessionDrafts.delete(sessionId);
+    if (!draft) return;
+
+    const fullText = draft.getBuffer();
+    const messageId = await draft.finalize();
+    this.sessionDrafts.delete(sessionId);
+
+    // Post-finalize: detect actions in assistant responses
+    if (sessionId === this.assistantSession?.id && messageId && fullText) {
+      const detected = detectAction(fullText);
+      if (detected) {
+        const actionId = storeAction(detected);
+        const keyboard = buildActionKeyboard(actionId, detected);
+        try {
+          await this.bot.api.editMessageReplyMarkup(
+            this.telegramConfig.chatId,
+            messageId,
+            { reply_markup: keyboard },
+          );
+        } catch (err) {
+          log.warn({ err }, "Failed to add action buttons");
+        }
+      }
     }
   }
 }
