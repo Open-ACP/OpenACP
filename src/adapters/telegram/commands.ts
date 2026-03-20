@@ -9,14 +9,20 @@ import { nanoid } from "nanoid";
 import type { AgentCommand } from "../../core/index.js";
 const log = createChildLogger({ module: "telegram-commands" });
 
+interface AssistantContext {
+  topicId: number;
+  getSession: () => Session | null;
+}
+
 export function setupCommands(
   bot: Bot,
   core: OpenACPCore,
   chatId: number,
+  assistant?: AssistantContext,
 ): void {
-  bot.command("new", (ctx) => handleNew(ctx, core, chatId));
+  bot.command("new", (ctx) => handleNew(ctx, core, chatId, assistant));
   bot.command("new_chat", (ctx) => handleNewChat(ctx, core, chatId));
-  bot.command("cancel", (ctx) => handleCancel(ctx, core));
+  bot.command("cancel", (ctx) => handleCancel(ctx, core, assistant));
   bot.command("status", (ctx) => handleStatus(ctx, core));
   bot.command("agents", (ctx) => handleAgents(ctx, core));
   bot.command("help", (ctx) => handleHelp(ctx));
@@ -82,12 +88,30 @@ async function handleNew(
   ctx: Context,
   core: OpenACPCore,
   chatId: number,
+  assistant?: AssistantContext,
 ): Promise<void> {
   const rawMatch = (ctx as Context & { match: unknown }).match;
   const matchStr = typeof rawMatch === "string" ? rawMatch : "";
   const args = matchStr.split(" ").filter(Boolean);
   const agentName = args[0];
   const workspace = args[1];
+
+  // In assistant topic: if missing params, forward to assistant for conversational gathering
+  const currentThreadId = ctx.message?.message_thread_id;
+  if (
+    assistant &&
+    currentThreadId === assistant.topicId &&
+    (!agentName || !workspace)
+  ) {
+    const assistantSession = assistant.getSession();
+    if (assistantSession) {
+      const prompt = agentName
+        ? `User wants to create a new session with agent "${agentName}" but didn't specify a workspace. Ask them which workspace to use.`
+        : `User wants to create a new session. Ask them which agent and workspace to use.`;
+      await assistantSession.enqueuePrompt(prompt);
+      return;
+    }
+  }
 
   log.info({ userId: ctx.from?.id, agentName }, "New session command");
 
@@ -211,9 +235,24 @@ async function handleNewChat(
   }
 }
 
-async function handleCancel(ctx: Context, core: OpenACPCore): Promise<void> {
+async function handleCancel(
+  ctx: Context,
+  core: OpenACPCore,
+  assistant?: AssistantContext,
+): Promise<void> {
   const threadId = ctx.message?.message_thread_id;
   if (!threadId) return;
+
+  // In assistant topic: forward to assistant for confirmation
+  if (assistant && threadId === assistant.topicId) {
+    const assistantSession = assistant.getSession();
+    if (assistantSession) {
+      await assistantSession.enqueuePrompt(
+        "User wants to cancel a session. Confirm which session to cancel.",
+      );
+      return;
+    }
+  }
 
   const session = core.sessionManager.getSessionByThread(
     "telegram",

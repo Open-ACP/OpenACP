@@ -152,6 +152,10 @@ export class TelegramAdapter extends ChannelAdapter {
       this.bot,
       this.core as OpenACPCore,
       this.telegramConfig.chatId,
+      {
+        topicId: this.assistantTopicId,
+        getSession: () => this.assistantSession,
+      },
     );
     this.permissionHandler.setupCallbackHandler();
 
