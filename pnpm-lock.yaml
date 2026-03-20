@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   grammy:
-    hash: dsgqscvmnv7l5ltokfnp67mvry
+    hash: c09faeff2c70d4b373ab13ba2744d7aaa57e2dce88c568414537be78f4aaca61
     path: patches/grammy.patch
 
 importers:
@@ -30,7 +30,7 @@ importers:
         version: 8.0.3
       grammy:
         specifier: ^1.30.0
-        version: 1.41.1(patch_hash=dsgqscvmnv7l5ltokfnp67mvry)
+        version: 1.41.1(patch_hash=c09faeff2c70d4b373ab13ba2744d7aaa57e2dce88c568414537be78f4aaca61)
       hono:
         specifier: ^4.12.8
         version: 4.12.8
@@ -2295,7 +2295,7 @@ snapshots:
       - encoding
       - supports-color
 
-  grammy@1.41.1(patch_hash=dsgqscvmnv7l5ltokfnp67mvry):
+  grammy@1.41.1(patch_hash=c09faeff2c70d4b373ab13ba2744d7aaa57e2dce88c568414537be78f4aaca61):
     dependencies:
       '@grammyjs/types': 3.25.0
       abort-controller: 3.0.0
