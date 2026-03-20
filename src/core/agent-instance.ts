@@ -22,37 +22,42 @@ const log = createChildLogger({ module: "agent-instance" });
 
 /** Resolve an agent command to a directly executable form (avoids shell wrappers) */
 function resolveAgentCommand(cmd: string): { command: string; args: string[] } {
-  // 1. Check local node_modules for the package's actual JS entry point
-  const packageDirs = [
-    path.resolve(
-      process.cwd(),
-      "node_modules",
-      "@zed-industries",
-      cmd,
-      "dist",
-      "index.js",
-    ),
-    path.resolve(process.cwd(), "node_modules", cmd, "dist", "index.js"),
-  ];
-  for (const jsPath of packageDirs) {
-    if (fs.existsSync(jsPath)) {
-      return { command: process.execPath, args: [jsPath] };
+  // Directories to search for node_modules: cwd AND the package's own directory
+  const searchRoots = [process.cwd()];
+  // Add the directory where this package is installed (for global installs)
+  const ownDir = path.resolve(import.meta.dirname, "..", "..");
+  if (ownDir !== process.cwd()) {
+    searchRoots.push(ownDir);
+  }
+
+  // 1. Check node_modules for the package's actual JS entry point
+  for (const root of searchRoots) {
+    const packageDirs = [
+      path.resolve(root, "node_modules", "@zed-industries", cmd, "dist", "index.js"),
+      path.resolve(root, "node_modules", cmd, "dist", "index.js"),
+    ];
+    for (const jsPath of packageDirs) {
+      if (fs.existsSync(jsPath)) {
+        return { command: process.execPath, args: [jsPath] };
+      }
     }
   }
 
-  // 2. Check local .bin — if it's a JS file with shebang, run with node directly
-  const localBin = path.resolve(process.cwd(), "node_modules", ".bin", cmd);
-  if (fs.existsSync(localBin)) {
-    const content = fs.readFileSync(localBin, "utf-8");
-    if (content.startsWith("#!/usr/bin/env node")) {
-      return { command: process.execPath, args: [localBin] };
-    }
-    // Shell wrapper — try to find the target JS file
-    const match = content.match(/"([^"]+\.js)"/);
-    if (match) {
-      const target = path.resolve(path.dirname(localBin), match[1]);
-      if (fs.existsSync(target)) {
-        return { command: process.execPath, args: [target] };
+  // 2. Check .bin — if it's a JS file with shebang, run with node directly
+  for (const root of searchRoots) {
+    const localBin = path.resolve(root, "node_modules", ".bin", cmd);
+    if (fs.existsSync(localBin)) {
+      const content = fs.readFileSync(localBin, "utf-8");
+      if (content.startsWith("#!/usr/bin/env node")) {
+        return { command: process.execPath, args: [localBin] };
+      }
+      // Shell wrapper — try to find the target JS file
+      const match = content.match(/"([^"]+\.js)"/);
+      if (match) {
+        const target = path.resolve(path.dirname(localBin), match[1]);
+        if (fs.existsSync(target)) {
+          return { command: process.execPath, args: [target] };
+        }
       }
     }
   }

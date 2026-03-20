@@ -1,11 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createChildLogger } from '../../core/log.js'
 import type { TunnelProvider } from '../provider.js'
-import { ensureCloudflared } from './install-cloudflared.js'
 
-const log = createChildLogger({ module: 'cloudflare-tunnel' })
+const log = createChildLogger({ module: 'bore-tunnel' })
 
-export class CloudflareTunnelProvider implements TunnelProvider {
+export class BoreTunnelProvider implements TunnelProvider {
   private child: ChildProcess | null = null
   private publicUrl = ''
   private options: Record<string, unknown>
@@ -15,29 +14,32 @@ export class CloudflareTunnelProvider implements TunnelProvider {
   }
 
   async start(localPort: number): Promise<string> {
-    // Auto-install cloudflared if not present
-    const binaryPath = await ensureCloudflared()
-
-    const args = ['tunnel', '--url', `http://localhost:${localPort}`]
-    if (this.options.domain) {
-      args.push('--hostname', String(this.options.domain))
+    const server = String(this.options.server || 'bore.pub')
+    const args = ['local', String(localPort), '--to', server]
+    if (this.options.port) {
+      args.push('--port', String(this.options.port))
+    }
+    if (this.options.secret) {
+      args.push('--secret', String(this.options.secret))
     }
 
     return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.stop()
-        reject(new Error('Cloudflare tunnel timed out after 30s'))
+        reject(new Error('Bore tunnel timed out after 30s. Is bore installed?'))
       }, 30_000)
 
       try {
-        this.child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+        this.child = spawn('bore', args, { stdio: ['ignore', 'pipe', 'pipe'] })
       } catch {
         clearTimeout(timeout)
-        reject(new Error(`Failed to start cloudflared at ${binaryPath}`))
+        reject(new Error(
+          'Failed to start bore. Install it from https://github.com/ekzhang/bore'
+        ))
         return
       }
 
-      const urlPattern = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/
+      const urlPattern = /listening at ([^\s]+):(\d+)/
 
       const onData = (data: Buffer) => {
         const line = data.toString()
@@ -45,8 +47,8 @@ export class CloudflareTunnelProvider implements TunnelProvider {
         const match = line.match(urlPattern)
         if (match) {
           clearTimeout(timeout)
-          this.publicUrl = match[0]
-          log.info({ url: this.publicUrl }, 'Cloudflare tunnel ready')
+          this.publicUrl = `http://${match[1]}:${match[2]}`
+          log.info({ url: this.publicUrl }, 'Bore tunnel ready')
           resolve(this.publicUrl)
         }
       }
@@ -56,13 +58,15 @@ export class CloudflareTunnelProvider implements TunnelProvider {
 
       this.child.on('error', (err) => {
         clearTimeout(timeout)
-        reject(new Error(`cloudflared failed to start: ${err.message}`))
+        reject(new Error(
+          `bore failed to start: ${err.message}. Install it from https://github.com/ekzhang/bore`
+        ))
       })
 
       this.child.on('exit', (code) => {
         if (!this.publicUrl) {
           clearTimeout(timeout)
-          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
+          reject(new Error(`bore exited with code ${code} before establishing tunnel`))
         }
       })
     })
@@ -72,7 +76,7 @@ export class CloudflareTunnelProvider implements TunnelProvider {
     if (this.child) {
       this.child.kill('SIGTERM')
       this.child = null
-      log.info('Cloudflare tunnel stopped')
+      log.info('Bore tunnel stopped')
     }
   }
 

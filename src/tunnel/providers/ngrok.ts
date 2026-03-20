@@ -1,11 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createChildLogger } from '../../core/log.js'
 import type { TunnelProvider } from '../provider.js'
-import { ensureCloudflared } from './install-cloudflared.js'
 
-const log = createChildLogger({ module: 'cloudflare-tunnel' })
+const log = createChildLogger({ module: 'ngrok-tunnel' })
 
-export class CloudflareTunnelProvider implements TunnelProvider {
+export class NgrokTunnelProvider implements TunnelProvider {
   private child: ChildProcess | null = null
   private publicUrl = ''
   private options: Record<string, unknown>
@@ -15,29 +14,34 @@ export class CloudflareTunnelProvider implements TunnelProvider {
   }
 
   async start(localPort: number): Promise<string> {
-    // Auto-install cloudflared if not present
-    const binaryPath = await ensureCloudflared()
-
-    const args = ['tunnel', '--url', `http://localhost:${localPort}`]
+    const args = ['http', String(localPort), '--log', 'stdout', '--log-format', 'json']
+    if (this.options.authtoken) {
+      args.push('--authtoken', String(this.options.authtoken))
+    }
     if (this.options.domain) {
-      args.push('--hostname', String(this.options.domain))
+      args.push('--domain', String(this.options.domain))
+    }
+    if (this.options.region) {
+      args.push('--region', String(this.options.region))
     }
 
     return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.stop()
-        reject(new Error('Cloudflare tunnel timed out after 30s'))
+        reject(new Error('ngrok tunnel timed out after 30s. Is ngrok installed?'))
       }, 30_000)
 
       try {
-        this.child = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+        this.child = spawn('ngrok', args, { stdio: ['ignore', 'pipe', 'pipe'] })
       } catch {
         clearTimeout(timeout)
-        reject(new Error(`Failed to start cloudflared at ${binaryPath}`))
+        reject(new Error(
+          'Failed to start ngrok. Install it from https://ngrok.com/download'
+        ))
         return
       }
 
-      const urlPattern = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/
+      const urlPattern = /https:\/\/[a-zA-Z0-9-]+\.ngrok(-free)?\.app/
 
       const onData = (data: Buffer) => {
         const line = data.toString()
@@ -46,7 +50,7 @@ export class CloudflareTunnelProvider implements TunnelProvider {
         if (match) {
           clearTimeout(timeout)
           this.publicUrl = match[0]
-          log.info({ url: this.publicUrl }, 'Cloudflare tunnel ready')
+          log.info({ url: this.publicUrl }, 'ngrok tunnel ready')
           resolve(this.publicUrl)
         }
       }
@@ -56,13 +60,15 @@ export class CloudflareTunnelProvider implements TunnelProvider {
 
       this.child.on('error', (err) => {
         clearTimeout(timeout)
-        reject(new Error(`cloudflared failed to start: ${err.message}`))
+        reject(new Error(
+          `ngrok failed to start: ${err.message}. Install it from https://ngrok.com/download`
+        ))
       })
 
       this.child.on('exit', (code) => {
         if (!this.publicUrl) {
           clearTimeout(timeout)
-          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
+          reject(new Error(`ngrok exited with code ${code} before establishing tunnel`))
         }
       })
     })
@@ -72,7 +78,7 @@ export class CloudflareTunnelProvider implements TunnelProvider {
     if (this.child) {
       this.child.kill('SIGTERM')
       this.child = null
-      log.info('Cloudflare tunnel stopped')
+      log.info('ngrok tunnel stopped')
     }
   }
 

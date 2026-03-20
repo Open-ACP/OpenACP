@@ -46,7 +46,7 @@ const TunnelSchema = z
   .object({
     enabled: z.boolean().default(false),
     port: z.number().default(3100),
-    provider: z.enum(["cloudflare", "ngrok", "bore"]).default("cloudflare"),
+    provider: z.enum(["cloudflare", "ngrok", "bore", "tailscale"]).default("cloudflare"),
     options: z.record(z.string(), z.unknown()).default({}),
     storeTtlMinutes: z.number().default(60),
     auth: TunnelAuthSchema,
@@ -72,6 +72,12 @@ export const ConfigSchema = z.object({
     })
     .default({}),
   logging: LoggingSchema,
+  runMode: z.enum(['foreground', 'daemon']).default('foreground'),
+  autoStart: z.boolean().default(false),
+  api: z.object({
+    port: z.number().default(21420),
+    host: z.string().default('127.0.0.1'),
+  }).default({}),
   sessionStore: z
     .object({
       ttlDays: z.number().default(30),
@@ -111,6 +117,14 @@ const DEFAULT_CONFIG = {
     sessionTimeoutMinutes: 60,
   },
   sessionStore: { ttlDays: 30 },
+  tunnel: {
+    enabled: true,
+    port: 3100,
+    provider: "cloudflare",
+    options: {},
+    storeTtlMinutes: 60,
+    auth: { enabled: false },
+  },
 };
 
 export class ConfigManager {
@@ -142,6 +156,24 @@ export class ConfigManager {
 
     // 3. Read and parse
     const raw = JSON.parse(fs.readFileSync(this.configPath, "utf-8"));
+
+    // 3.5. Auto-migrate: add missing sections with defaults
+    let configUpdated = false;
+    if (!raw.tunnel) {
+      raw.tunnel = {
+        enabled: true,
+        port: 3100,
+        provider: "cloudflare",
+        options: {},
+        storeTtlMinutes: 60,
+        auth: { enabled: false },
+      };
+      configUpdated = true;
+      log.info("Added tunnel section to config (enabled by default with cloudflare)");
+    }
+    if (configUpdated) {
+      fs.writeFileSync(this.configPath, JSON.stringify(raw, null, 2));
+    }
 
     // 4. Apply env var overrides
     this.applyEnvOverrides(raw);
@@ -214,6 +246,8 @@ export class ConfigManager {
       ["OPENACP_TELEGRAM_BOT_TOKEN", ["channels", "telegram", "botToken"]],
       ["OPENACP_TELEGRAM_CHAT_ID", ["channels", "telegram", "chatId"]],
       ["OPENACP_DEFAULT_AGENT", ["defaultAgent"]],
+      ["OPENACP_RUN_MODE", ["runMode"]],
+      ["OPENACP_API_PORT", ["api", "port"]],
     ];
     for (const [envVar, configPath] of overrides) {
       const value = process.env[envVar];
@@ -224,8 +258,8 @@ export class ConfigManager {
           target = target[configPath[i]];
         }
         const key = configPath[configPath.length - 1];
-        // Convert chatId to number
-        target[key] = key === "chatId" ? Number(value) : value;
+        // Convert numeric fields to number
+        target[key] = (key === "chatId" || key === "port") ? Number(value) : value;
       }
     }
 

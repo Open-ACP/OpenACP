@@ -58,7 +58,7 @@ const publishPkg = {
   dependencies: rootPkg.dependencies,
   repository: {
     type: 'git',
-    url: 'https://github.com/nicepkg/OpenACP',
+    url: 'https://github.com/Open-ACP/OpenACP',
   },
   license: 'AGPL-3.0',
   keywords: ['acp', 'ai', 'coding-agent', 'telegram', 'claude', 'codex'],

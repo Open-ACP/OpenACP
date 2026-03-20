@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot } from "grammy";
 import {
   ChannelAdapter,
   type OpenACPCore,
@@ -39,6 +39,7 @@ import {
   formatPlan,
   formatUsage,
 } from "./formatting.js";
+import { TelegramSendQueue } from "./send-queue.js";
 import {
   detectAction,
   storeAction,
@@ -46,10 +47,37 @@ import {
   setupActionCallbacks,
 } from "./action-detect.js";
 
+/**
+ * Wraps native fetch to work around grammY's polyfilled AbortController.
+ * grammY uses abort-controller polyfill whose AbortSignal fails instanceof
+ * checks in Node 24+ native fetch. This wrapper re-creates a native
+ * AbortSignal from the polyfilled one before passing it to fetch.
+ */
+function patchedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  if (init?.signal && !(init.signal instanceof AbortSignal)) {
+    const nativeController = new AbortController();
+    const polyfillSignal = init.signal as unknown as {
+      aborted: boolean;
+      addEventListener: (event: string, fn: () => void) => void;
+    };
+    if (polyfillSignal.aborted) {
+      nativeController.abort();
+    } else {
+      polyfillSignal.addEventListener("abort", () => nativeController.abort());
+    }
+    init = { ...init, signal: nativeController.signal };
+  }
+  return fetch(input, init);
+}
+
 export class TelegramAdapter extends ChannelAdapter {
   private bot!: Bot;
   private telegramConfig: TelegramChannelConfig;
   private sessionDrafts: Map<string, MessageDraft> = new Map();
+  private sessionTextBuffers: Map<string, string> = new Map();
   private toolCallMessages: Map<
     string,
     Map<
@@ -67,6 +95,7 @@ export class TelegramAdapter extends ChannelAdapter {
   private notificationTopicId!: number;
   private assistantTopicId!: number;
   private skillMessages: Map<string, number> = new Map(); // sessionId → pinned messageId
+  private sendQueue = new TelegramSendQueue()
 
   constructor(core: OpenACPCore, config: TelegramChannelConfig) {
     super(core, config as never);
@@ -74,12 +103,38 @@ export class TelegramAdapter extends ChannelAdapter {
   }
 
   async start(): Promise<void> {
-    this.bot = new Bot(this.telegramConfig.botToken, { client: { fetch } });
+    this.bot = new Bot(this.telegramConfig.botToken, { client: { fetch: patchedFetch } });
 
     // Global error handler — prevent unhandled errors from crashing the bot
     this.bot.catch((err) => {
       const rootCause = err.error instanceof Error ? err.error : err;
       log.error({ err: rootCause }, "Telegram bot error");
+    });
+
+    // Auto-retry on 429 (Too Many Requests) — waits the retry_after duration
+    // and retries the request. Applies to ALL API calls globally.
+    this.bot.api.config.use(async (prev, method, payload, signal) => {
+      const maxRetries = 3;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const result = await prev(method, payload, signal);
+        if (
+          result.ok ||
+          (result as { error_code?: number }).error_code !== 429 ||
+          attempt === maxRetries
+        ) {
+          return result;
+        }
+        const retryAfter =
+          ((result as { parameters?: { retry_after?: number } }).parameters
+            ?.retry_after ?? 5) + 1;
+        log.warn(
+          { method, retryAfter, attempt: attempt + 1 },
+          "Rate limited by Telegram, retrying",
+        );
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      }
+      // Unreachable, but satisfies TypeScript
+      return prev(method, payload, signal);
     });
 
     // Ensure allowed_updates includes callback_query on every poll.
@@ -287,10 +342,16 @@ export class TelegramAdapter extends ChannelAdapter {
             this.bot,
             this.telegramConfig.chatId,
             threadId,
+            this.telegramConfig.streamThrottleMs,
+            this.sendQueue,
           );
           this.sessionDrafts.set(sessionId, draft);
         }
         draft.append(content.text);
+        this.sessionTextBuffers.set(
+          sessionId,
+          (this.sessionTextBuffers.get(sessionId) ?? '') + content.text,
+        );
         break;
       }
 
@@ -304,14 +365,16 @@ export class TelegramAdapter extends ChannelAdapter {
           content?: unknown;
           viewerLinks?: { file?: string; diff?: string };
         };
-        const msg = await this.bot.api.sendMessage(
-          this.telegramConfig.chatId,
-          formatToolCall(meta),
-          {
-            message_thread_id: threadId,
-            parse_mode: "HTML",
-            disable_notification: true,
-          },
+        const msg = await this.sendQueue.enqueue(() =>
+          this.bot.api.sendMessage(
+            this.telegramConfig.chatId,
+            formatToolCall(meta),
+            {
+              message_thread_id: threadId,
+              parse_mode: "HTML",
+              disable_notification: true,
+            },
+          ),
         );
         if (!this.toolCallMessages.has(sessionId)) {
           this.toolCallMessages.set(sessionId, new Map());
@@ -347,11 +410,13 @@ export class TelegramAdapter extends ChannelAdapter {
             viewerLinks,
           };
           try {
-            await this.bot.api.editMessageText(
-              this.telegramConfig.chatId,
-              toolState.msgId,
-              formatToolUpdate(merged),
-              { parse_mode: "HTML" },
+            await this.sendQueue.enqueue(() =>
+              this.bot.api.editMessageText(
+                this.telegramConfig.chatId,
+                toolState.msgId,
+                formatToolUpdate(merged),
+                { parse_mode: "HTML" },
+              ),
             );
           } catch {
             /* edit failed */
@@ -362,18 +427,20 @@ export class TelegramAdapter extends ChannelAdapter {
 
       case "plan": {
         await this.finalizeDraft(sessionId);
-        await this.bot.api.sendMessage(
-          this.telegramConfig.chatId,
-          formatPlan(
-            content.metadata as never as {
-              entries: Array<{ content: string; status: string }>;
+        await this.sendQueue.enqueue(() =>
+          this.bot.api.sendMessage(
+            this.telegramConfig.chatId,
+            formatPlan(
+              content.metadata as never as {
+                entries: Array<{ content: string; status: string }>;
+              },
+            ),
+            {
+              message_thread_id: threadId,
+              parse_mode: "HTML",
+              disable_notification: true,
             },
           ),
-          {
-            message_thread_id: threadId,
-            parse_mode: "HTML",
-            disable_notification: true,
-          },
         );
         break;
       }
@@ -381,20 +448,22 @@ export class TelegramAdapter extends ChannelAdapter {
       case "usage": {
         await this.finalizeDraft(sessionId);
         // Show usage stats
-        await this.bot.api.sendMessage(
-          this.telegramConfig.chatId,
-          formatUsage(
-            content.metadata as never as {
-              tokensUsed?: number;
-              contextSize?: number;
-              cost?: { amount: number; currency: string };
+        await this.sendQueue.enqueue(() =>
+          this.bot.api.sendMessage(
+            this.telegramConfig.chatId,
+            formatUsage(
+              content.metadata as never as {
+                tokensUsed?: number;
+                contextSize?: number;
+                cost?: { amount: number; currency: string };
+              },
+            ),
+            {
+              message_thread_id: threadId,
+              parse_mode: "HTML",
+              disable_notification: true,
             },
           ),
-          {
-            message_thread_id: threadId,
-            parse_mode: "HTML",
-            disable_notification: true,
-          },
         );
         break;
       }
@@ -404,28 +473,32 @@ export class TelegramAdapter extends ChannelAdapter {
         this.sessionDrafts.delete(sessionId);
         this.toolCallMessages.delete(sessionId);
         await this.cleanupSkillCommands(sessionId);
-        await this.bot.api.sendMessage(
-          this.telegramConfig.chatId,
-          `✅ <b>Done</b>`,
-          {
-            message_thread_id: threadId,
-            parse_mode: "HTML",
-            disable_notification: true,
-          },
+        await this.sendQueue.enqueue(() =>
+          this.bot.api.sendMessage(
+            this.telegramConfig.chatId,
+            `✅ <b>Done</b>`,
+            {
+              message_thread_id: threadId,
+              parse_mode: "HTML",
+              disable_notification: true,
+            },
+          ),
         );
         break;
       }
 
       case "error": {
         await this.finalizeDraft(sessionId);
-        await this.bot.api.sendMessage(
-          this.telegramConfig.chatId,
-          `❌ <b>Error:</b> ${escapeHtml(content.text)}`,
-          {
-            message_thread_id: threadId,
-            parse_mode: "HTML",
-            disable_notification: true,
-          },
+        await this.sendQueue.enqueue(() =>
+          this.bot.api.sendMessage(
+            this.telegramConfig.chatId,
+            `❌ <b>Error:</b> ${escapeHtml(content.text)}`,
+            {
+              message_thread_id: threadId,
+              parse_mode: "HTML",
+              disable_notification: true,
+            },
+          ),
         );
         break;
       }
@@ -441,7 +514,9 @@ export class TelegramAdapter extends ChannelAdapter {
       sessionId,
     );
     if (!session) return;
-    await this.permissionHandler.sendPermissionRequest(session, request);
+    await this.sendQueue.enqueue(() =>
+      this.permissionHandler.sendPermissionRequest(session, request),
+    );
   }
 
   async sendNotification(notification: NotificationMessage): Promise<void> {
@@ -461,11 +536,13 @@ export class TelegramAdapter extends ChannelAdapter {
     if (notification.deepLink) {
       text += `\n\n<a href="${notification.deepLink}">→ Go to message</a>`;
     }
-    await this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
-      message_thread_id: this.notificationTopicId,
-      parse_mode: "HTML",
-      disable_notification: false,
-    });
+    await this.sendQueue.enqueue(() =>
+      this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
+        message_thread_id: this.notificationTopicId,
+        parse_mode: "HTML",
+        disable_notification: false,
+      }),
+    );
   }
 
   async createSessionThread(sessionId: string, name: string): Promise<string> {
@@ -529,15 +606,17 @@ export class TelegramAdapter extends ChannelAdapter {
 
     // Create and pin new message
     try {
-      const msg = await this.bot.api.sendMessage(
-        this.telegramConfig.chatId,
-        text,
-        {
-          message_thread_id: threadId,
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-          disable_notification: true,
-        },
+      const msg = await this.sendQueue.enqueue(() =>
+        this.bot.api.sendMessage(
+          this.telegramConfig.chatId,
+          text,
+          {
+            message_thread_id: threadId,
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+            disable_notification: true,
+          },
+        ),
       );
       this.skillMessages.set(sessionId, msg.message_id);
 
@@ -614,20 +693,31 @@ export class TelegramAdapter extends ChannelAdapter {
     const draft = this.sessionDrafts.get(sessionId);
     if (!draft) return;
 
-    // Detect actions in assistant responses and pass keyboard to finalize in one API call
-    let keyboard: InlineKeyboard | undefined;
+    const finalMsgId = await draft.finalize();
+    this.sessionDrafts.delete(sessionId);
+
+    // Detect actions in assistant responses and attach keyboard via editMessageReplyMarkup
     if (sessionId === this.assistantSession?.id) {
-      const fullText = draft.getBuffer();
-      if (fullText) {
+      const fullText = this.sessionTextBuffers.get(sessionId);
+      this.sessionTextBuffers.delete(sessionId);
+      if (fullText && finalMsgId) {
         const detected = detectAction(fullText);
         if (detected) {
           const actionId = storeAction(detected);
-          keyboard = buildActionKeyboard(actionId, detected);
+          const keyboard = buildActionKeyboard(actionId, detected);
+          try {
+            await this.bot.api.editMessageReplyMarkup(
+              this.telegramConfig.chatId,
+              finalMsgId,
+              { reply_markup: keyboard },
+            );
+          } catch {
+            // Best effort — keyboard attachment is non-critical
+          }
         }
       }
+    } else {
+      this.sessionTextBuffers.delete(sessionId);
     }
-
-    await draft.finalize(keyboard);
-    this.sessionDrafts.delete(sessionId);
   }
 }

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { input, select } from "@inquirer/prompts";
 import type { Config, ConfigManager } from "./config.js";
+import { expandHome } from "./config.js";
 
 // --- ANSI colors ---
 
@@ -83,6 +84,54 @@ export async function validateChatId(
       ok: true,
       title: data.result.title,
       isForum: data.result.is_forum === true,
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export async function validateBotAdmin(
+  token: string,
+  chatId: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    // Get bot's own user ID
+    const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const meData = (await meRes.json()) as {
+      ok: boolean;
+      result?: { id: number };
+    };
+    if (!meData.ok || !meData.result) {
+      return { ok: false, error: "Could not retrieve bot info" };
+    }
+
+    const res = await fetch(
+      `https://api.telegram.org/bot${token}/getChatMember`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, user_id: meData.result.id }),
+      },
+    );
+    const data = (await res.json()) as {
+      ok: boolean;
+      result?: { status: string };
+      description?: string;
+    };
+    if (!data.ok || !data.result) {
+      return {
+        ok: false,
+        error: data.description || "Could not check bot membership",
+      };
+    }
+
+    const { status } = data.result;
+    if (status === "administrator" || status === "creator") {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: `Bot is "${status}" in this group. It must be an admin. Please promote the bot to admin in group settings.`,
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -318,9 +367,46 @@ export async function setupTelegram(): Promise<Config["channels"][string]> {
     if (action === "skip") break;
   }
 
-  console.log(step(2, "Group Chat"));
+  let chatId: number;
 
-  const chatId = await detectChatId(botToken);
+  while (true) {
+    chatId = await detectChatId(botToken);
+
+    // Validate bot can access this chat and it's a supergroup
+    const chatResult = await validateChatId(botToken, chatId);
+    if (!chatResult.ok) {
+      console.log(fail(chatResult.error));
+      console.log("");
+      console.log(`  ${c.bold}How to fix:${c.reset}`);
+      console.log(dim("  1. Make sure the bot is added to the group"));
+      console.log(dim("  2. The group must be a Supergroup (Group Settings → convert)"));
+      console.log(dim("  3. Send a message in the group after adding the bot"));
+      console.log("");
+      await input({ message: "Press Enter to try again..." });
+      continue;
+    }
+    console.log(
+      ok(
+        `Group: ${c.bold}${chatResult.title}${c.reset}${c.green}${chatResult.isForum ? " (Topics enabled)" : ""}`,
+      ),
+    );
+
+    // Check bot has admin privileges
+    const adminResult = await validateBotAdmin(botToken, chatId);
+    if (!adminResult.ok) {
+      console.log(fail(adminResult.error));
+      console.log("");
+      console.log(`  ${c.bold}How to fix:${c.reset}`);
+      console.log(dim("  1. Open the group in Telegram"));
+      console.log(dim("  2. Go to Group Settings → Administrators"));
+      console.log(dim("  3. Add the bot as an administrator"));
+      console.log("");
+      await input({ message: "Press Enter to check again..." });
+      continue;
+    }
+    console.log(ok("Bot has admin privileges"));
+    break;
+  }
 
   return {
     enabled: true,
@@ -356,7 +442,7 @@ export async function setupAgents(): Promise<{
 }
 
 export async function setupWorkspace(): Promise<{ baseDir: string }> {
-  console.log(step(3, "Workspace"));
+  console.log(step(2, "Workspace"));
 
   const baseDir = await input({
     message: "Base directory for workspaces:",
@@ -365,6 +451,48 @@ export async function setupWorkspace(): Promise<{ baseDir: string }> {
   });
 
   return { baseDir: baseDir.trim().replace(/^['"]|['"]$/g, "") };
+}
+
+export async function setupRunMode(): Promise<{ runMode: 'foreground' | 'daemon'; autoStart: boolean }> {
+  console.log(step(3, 'Run Mode'))
+
+  // Don't show daemon option on Windows
+  if (process.platform === 'win32') {
+    console.log(dim('  (Daemon mode not available on Windows)'))
+    return { runMode: 'foreground', autoStart: false }
+  }
+
+  const mode = await select({
+    message: 'How would you like to run OpenACP?',
+    choices: [
+      {
+        name: 'Background (daemon)',
+        value: 'daemon' as const,
+        description: 'Runs silently, auto-starts on boot. Manage with: openacp status | stop | logs',
+      },
+      {
+        name: 'Foreground (terminal)',
+        value: 'foreground' as const,
+        description: 'Runs in current terminal session. Start with: openacp',
+      },
+    ],
+  })
+
+  if (mode === 'daemon') {
+    const { installAutoStart, isAutoStartSupported } = await import('./autostart.js')
+    const autoStart = isAutoStartSupported()
+    if (autoStart) {
+      const result = installAutoStart(expandHome('~/.openacp/logs'))
+      if (result.success) {
+        console.log(ok('Auto-start on boot enabled'))
+      } else {
+        console.log(warn(`Auto-start failed: ${result.error}`))
+      }
+    }
+    return { runMode: 'daemon', autoStart }
+  }
+
+  return { runMode: 'foreground', autoStart: false }
 }
 
 // --- Orchestrator ---
@@ -384,6 +512,7 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
     const telegram = await setupTelegram();
     const { agents, defaultAgent } = await setupAgents();
     const workspace = await setupWorkspace();
+    const { runMode, autoStart } = await setupRunMode();
     const security = {
       allowedUserIds: [] as string[],
       maxConcurrentSessions: 5,
@@ -403,9 +532,15 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
         maxFiles: 7,
         sessionLogRetentionDays: 30,
       },
+      runMode,
+      autoStart,
+      api: {
+        port: 21420,
+        host: '127.0.0.1',
+      },
       sessionStore: { ttlDays: 30 },
       tunnel: {
-        enabled: false,
+        enabled: true,
         port: 3100,
         provider: "cloudflare",
         options: {},
@@ -427,6 +562,25 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
     console.log(
       ok(`Config saved to ${c.bold}${configManager.getConfigPath()}`),
     );
+
+    // Pre-download cloudflared if tunnel enabled
+    if (config.tunnel.enabled && config.tunnel.provider === "cloudflare") {
+      console.log(dim("  Ensuring cloudflared is installed..."));
+      try {
+        const { ensureCloudflared } = await import(
+          "../tunnel/providers/install-cloudflared.js"
+        );
+        const binPath = await ensureCloudflared();
+        console.log(ok(`cloudflared ready at ${dim(binPath)}`));
+      } catch (err) {
+        console.log(
+          warn(
+            `Could not install cloudflared: ${(err as Error).message}. Tunnel may not work.`,
+          ),
+        );
+      }
+    }
+
     console.log(ok("Starting OpenACP..."));
     console.log("");
 

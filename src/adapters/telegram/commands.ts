@@ -161,6 +161,7 @@ async function handleNew(
     // Warm up model cache in background while user types
     session.warmup().catch((err) => log.error({ err }, "Warm-up error"));
   } catch (err) {
+    log.error({ err }, "Session creation failed");
     // Clean up orphaned topic if session creation failed
     if (threadId) {
       try {
@@ -169,7 +170,7 @@ async function handleNew(
         /* ignore cleanup failures */
       }
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const message = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
     await ctx.reply(`❌ ${escapeHtml(message)}`, { parse_mode: "HTML" });
   }
 }

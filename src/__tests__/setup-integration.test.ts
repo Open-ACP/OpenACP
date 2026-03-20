@@ -20,10 +20,17 @@ vi.mock('node:child_process', () => ({
   }),
 }))
 
-import { input } from '@inquirer/prompts'
+// Mock autostart module
+vi.mock('../core/autostart.js', () => ({
+  isAutoStartSupported: vi.fn(() => false),
+  installAutoStart: vi.fn(() => ({ success: true })),
+}))
+
+import { input, select } from '@inquirer/prompts'
 import { runSetup } from '../core/setup.js'
 
 const mockedInput = vi.mocked(input)
+const mockedSelect = vi.mocked(select)
 
 describe('runSetup integration', () => {
   let tmpDir: string
@@ -55,6 +62,22 @@ describe('runSetup integration', () => {
           }),
         })
       }
+      if (url.includes('/getUpdates')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 1,
+                message: {
+                  chat: { id: -1001234567890, title: 'Test Group', type: 'supergroup' },
+                },
+              },
+            ],
+          }),
+        })
+      }
       return Promise.reject(new Error('unexpected URL'))
     }))
   })
@@ -72,17 +95,19 @@ describe('runSetup integration', () => {
   it('creates valid config file and auto-starts', async () => {
     // Input call order:
     // 1. setupTelegram: bot token
-    // 2. setupTelegram: chat ID
-    // 3. setupWorkspace: workspace base dir
+    // 2. setupWorkspace: workspace base dir
     let inputCallIndex = 0
     mockedInput.mockImplementation((() => {
       const responses = [
         '123:FAKE_TOKEN',    // bot token
-        '-1001234567890',    // chat ID
         '~/my-workspace',   // workspace dir
       ]
       return Promise.resolve(responses[inputCallIndex++])
     }) as any)
+
+    // Select call order:
+    // 1. setupRunMode: run mode selection
+    mockedSelect.mockResolvedValueOnce('foreground' as any)
 
     const cm = new ConfigManager()
     const shouldStart = await runSetup(cm)

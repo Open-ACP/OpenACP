@@ -1,84 +1,108 @@
-import { type Bot, InlineKeyboard } from "grammy";
-import { markdownToTelegramHtml, splitMessage } from "./formatting.js";
+import type { Bot } from 'grammy'
+import { markdownToTelegramHtml, splitMessage } from './formatting.js'
+import type { TelegramSendQueue } from './send-queue.js'
+
+let nextDraftId = 1
 
 export class MessageDraft {
-  private messageId?: number;
-  private buffer: string = "";
-  private lastFlush: number = 0;
-  private flushTimer?: ReturnType<typeof setTimeout>;
-  private flushPromise: Promise<void> = Promise.resolve(); // serialize flushes
-  private minInterval = 1000; // 1 second throttle
+  private draftId: number
+  private buffer: string = ''
+  private lastFlush: number = 0
+  private flushTimer?: ReturnType<typeof setTimeout>
+  private flushPromise: Promise<void> = Promise.resolve()
+  private minInterval: number
+  private useFallback = false
+  private messageId?: number  // Only set in fallback mode (sendMessageDraft returns true, not Message)
 
   constructor(
     private bot: Bot,
     private chatId: number,
     private threadId: number,
-  ) {}
+    throttleMs = 200,
+    private sendQueue?: TelegramSendQueue,
+  ) {
+    this.draftId = nextDraftId++
+    this.minInterval = throttleMs
+  }
 
   append(text: string): void {
-    this.buffer += text;
-    this.scheduleFlush();
+    this.buffer += text
+    this.scheduleFlush()
   }
 
   private scheduleFlush(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastFlush;
+    const now = Date.now()
+    const elapsed = now - this.lastFlush
 
     if (elapsed >= this.minInterval) {
-      // Chain flush to prevent concurrent sends
-      this.flushPromise = this.flushPromise
-        .then(() => this.flush())
-        .catch(() => {});
+      this.flushPromise = this.flushPromise.then(() => this.flush()).catch(() => {})
     } else if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
-        this.flushTimer = undefined;
-        this.flushPromise = this.flushPromise
-          .then(() => this.flush())
-          .catch(() => {});
-      }, this.minInterval - elapsed);
+        this.flushTimer = undefined
+        this.flushPromise = this.flushPromise.then(() => this.flush()).catch(() => {})
+      }, this.minInterval - elapsed)
     }
   }
 
   private async flush(): Promise<void> {
-    if (!this.buffer) return;
-    this.lastFlush = Date.now();
+    if (!this.buffer) return
+    this.lastFlush = Date.now()
 
-    const html = markdownToTelegramHtml(this.buffer);
-    // Truncate for streaming (will send full on finalize)
-    const truncated = html.length > 4096 ? html.slice(0, 4090) + "\n..." : html;
-    if (!truncated) return;
+    const html = markdownToTelegramHtml(this.buffer)
+    const truncated = html.length > 4096 ? html.slice(0, 4090) + '\n...' : html
+    if (!truncated) return
+
+    if (this.useFallback) {
+      await this.flushFallback(truncated)
+      return
+    }
+
+    try {
+      await this.bot.api.sendMessageDraft(this.chatId, this.draftId, truncated, {
+        message_thread_id: this.threadId,
+        parse_mode: 'HTML',
+      })
+    } catch {
+      // sendMessageDraft failed — switch to fallback for this session
+      this.useFallback = true
+      this.minInterval = 1000  // Slower interval for editMessageText
+      await this.flushFallback(truncated)
+    }
+  }
+
+  private async flushFallback(html: string): Promise<void> {
+    // Route through send queue when available (fallback uses editMessageText which shares rate limits)
+    const exec = this.sendQueue
+      ? <T>(fn: () => Promise<T>) => this.sendQueue!.enqueue(fn)
+      : <T>(fn: () => Promise<T>) => fn()
 
     try {
       if (!this.messageId) {
-        const msg = await this.bot.api.sendMessage(this.chatId, truncated, {
-          message_thread_id: this.threadId,
-          parse_mode: "HTML",
-          disable_notification: true,
-        });
-        this.messageId = msg.message_id;
+        const msg = await exec(() =>
+          this.bot.api.sendMessage(this.chatId, html, {
+            message_thread_id: this.threadId,
+            parse_mode: 'HTML',
+            disable_notification: true,
+          }),
+        )
+        this.messageId = msg.message_id
       } else {
-        await this.bot.api.editMessageText(
-          this.chatId,
-          this.messageId,
-          truncated,
-          {
-            parse_mode: "HTML",
-          },
-        );
+        await exec(() =>
+          this.bot.api.editMessageText(this.chatId, this.messageId!, html, {
+            parse_mode: 'HTML',
+          }),
+        )
       }
     } catch {
-      // Edit failed — try plain text without HTML parse mode
       try {
         if (!this.messageId) {
-          const msg = await this.bot.api.sendMessage(
-            this.chatId,
-            this.buffer.slice(0, 4096),
-            {
+          const msg = await exec(() =>
+            this.bot.api.sendMessage(this.chatId, this.buffer.slice(0, 4096), {
               message_thread_id: this.threadId,
               disable_notification: true,
-            },
-          );
-          this.messageId = msg.message_id;
+            }),
+          )
+          this.messageId = msg.message_id
         }
       } catch {
         // Give up on this flush
@@ -86,75 +110,52 @@ export class MessageDraft {
     }
   }
 
-  async finalize(replyMarkup?: InlineKeyboard): Promise<number | undefined> {
+  async finalize(): Promise<number | undefined> {
     if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = undefined;
+      clearTimeout(this.flushTimer)
+      this.flushTimer = undefined
     }
 
-    // Wait for any in-flight flush to complete
-    await this.flushPromise;
+    await this.flushPromise
 
-    if (!this.buffer) return this.messageId;
+    if (!this.buffer) return this.messageId
 
-    // Final send with full content + splitting
-    const html = markdownToTelegramHtml(this.buffer);
-    const chunks = splitMessage(html);
+    const html = markdownToTelegramHtml(this.buffer)
+    const chunks = splitMessage(html)
 
     try {
       for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        // Only attach keyboard to the LAST chunk
-        const isLast = i === chunks.length - 1;
-        const markup =
-          isLast && replyMarkup ? { reply_markup: replyMarkup } : {};
-
+        const chunk = chunks[i]
         if (i === 0 && this.messageId) {
-          // Edit existing message with first chunk
-          await this.bot.api.editMessageText(
-            this.chatId,
-            this.messageId,
-            chunk,
-            {
-              parse_mode: "HTML",
-              ...markup,
-            },
-          );
+          // Fallback mode only: messageId is only set when using sendMessage+editMessageText
+          await this.bot.api.editMessageText(this.chatId, this.messageId, chunk, {
+            parse_mode: 'HTML',
+          })
         } else {
-          // Send new message
+          // sendMessage replaces the draft (non-fallback) or creates new message (fallback/splits)
           const msg = await this.bot.api.sendMessage(this.chatId, chunk, {
             message_thread_id: this.threadId,
-            parse_mode: "HTML",
+            parse_mode: 'HTML',
             disable_notification: true,
-            ...markup,
-          });
-          this.messageId = msg.message_id;
+          })
+          this.messageId = msg.message_id
         }
       }
     } catch {
-      // Best effort — try plain text
       try {
-        await this.bot.api.sendMessage(
-          this.chatId,
-          this.buffer.slice(0, 4096),
-          {
-            message_thread_id: this.threadId,
-            disable_notification: true,
-          },
-        );
+        await this.bot.api.sendMessage(this.chatId, this.buffer.slice(0, 4096), {
+          message_thread_id: this.threadId,
+          disable_notification: true,
+        })
       } catch {
         // Give up
       }
     }
 
-    return this.messageId;
+    return this.messageId
   }
 
   getMessageId(): number | undefined {
-    return this.messageId;
-  }
-
-  getBuffer(): string {
-    return this.buffer;
+    return this.messageId
   }
 }

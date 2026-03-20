@@ -117,6 +117,7 @@ export class Session {
     try {
       const start = Date.now();
       await this.agentInstance.prompt('Reply with only "ready".');
+      this.status = 'active';
       this.log.info({ durationMs: Date.now() - start }, "Warm-up complete");
     } catch (err) {
       this.log.error({ err }, "Warm-up failed");
