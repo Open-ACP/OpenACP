@@ -343,9 +343,8 @@ export class TelegramAdapter extends ChannelAdapter {
             this.bot,
             this.telegramConfig.chatId,
             threadId,
-            this.telegramConfig.streamThrottleMs,
             this.sendQueue,
-            'supergroup',
+            sessionId,
           );
           this.sessionDrafts.set(sessionId, draft);
         }
