@@ -46,7 +46,7 @@ export class TelegramAdapter extends ChannelAdapter {
   private sessionDrafts: Map<string, MessageDraft> = new Map();
   private toolCallMessages: Map<
     string,
-    Map<string, { msgId: number; name: string; kind?: string }>
+    Map<string, { msgId: number; name: string; kind?: string; viewerLinks?: { file?: string; diff?: string } }>
   > = new Map(); // sessionId → (toolCallId → state)
   private permissionHandler!: PermissionHandler;
   private assistantSession: Session | null = null;
@@ -272,7 +272,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
       case "tool_call": {
         await this.finalizeDraft(sessionId);
-        const meta = content.metadata as never as { id: string; name: string; kind?: string; status?: string; content?: unknown };
+        const meta = content.metadata as never as { id: string; name: string; kind?: string; status?: string; content?: unknown; viewerLinks?: { file?: string; diff?: string } };
         const msg = await this.bot.api.sendMessage(
           this.telegramConfig.chatId,
           formatToolCall(meta),
@@ -289,19 +289,24 @@ export class TelegramAdapter extends ChannelAdapter {
           msgId: msg.message_id,
           name: meta.name,
           kind: meta.kind,
+          viewerLinks: meta.viewerLinks,
         });
         break;
       }
 
       case "tool_update": {
-        const meta = content.metadata as never as { id: string; name: string; kind?: string; status: string; content?: unknown };
+        const meta = content.metadata as never as { id: string; name: string; kind?: string; status: string; content?: unknown; viewerLinks?: { file?: string; diff?: string } };
         const toolState = this.toolCallMessages.get(sessionId)?.get(meta.id);
         if (toolState) {
+          // Carry forward viewerLinks from previous updates if not present in current
+          const viewerLinks = meta.viewerLinks || toolState.viewerLinks;
+          if (meta.viewerLinks) toolState.viewerLinks = meta.viewerLinks;
           // Merge name/kind from original tool_call
           const merged = {
             ...meta,
             name: meta.name || toolState.name,
             kind: meta.kind || toolState.kind,
+            viewerLinks,
           };
           try {
             await this.bot.api.editMessageText(
