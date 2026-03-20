@@ -427,6 +427,25 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
     console.log(
       ok(`Config saved to ${c.bold}${configManager.getConfigPath()}`),
     );
+
+    // Pre-download cloudflared if tunnel enabled
+    if (config.tunnel.enabled && config.tunnel.provider === "cloudflare") {
+      console.log(dim("  Ensuring cloudflared is installed..."));
+      try {
+        const { ensureCloudflared } = await import(
+          "../tunnel/providers/install-cloudflared.js"
+        );
+        const binPath = await ensureCloudflared();
+        console.log(ok(`cloudflared ready at ${dim(binPath)}`));
+      } catch (err) {
+        console.log(
+          warn(
+            `Could not install cloudflared: ${(err as Error).message}. Tunnel may not work.`,
+          ),
+        );
+      }
+    }
+
     console.log(ok("Starting OpenACP..."));
     console.log("");
 
