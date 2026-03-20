@@ -13,6 +13,7 @@ let rootLogger: pino.Logger = pino({
 })
 let initialized = false
 let logDir: string | undefined
+let currentTransport: ReturnType<typeof pino.transport> | undefined
 
 function expandHome(p: string): string {
   return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p
@@ -102,6 +103,7 @@ export function initLogger(config: LoggingConfig): Logger {
     ],
   })
 
+  currentTransport = transports
   rootLogger = pino({ level: config.level }, transports)
   initialized = true
 
@@ -179,23 +181,25 @@ export function createSessionLogger(sessionId: string, parentLogger: Logger): Lo
 export async function shutdownLogger(): Promise<void> {
   if (!initialized) return
 
-  return new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve()
-    }, 5000)
+  const transport = currentTransport
 
-    rootLogger.flush()
-    // Give transports time to flush
-    setTimeout(() => {
-      clearTimeout(timeout)
-      // Reset to console-only logger so tests can re-init
-      rootLogger = pino({ level: 'debug' })
-      Object.assign(log, wrapVariadic(rootLogger))
-      logDir = undefined
-      initialized = false
-      resolve()
-    }, 500)
-  })
+  // Reset state immediately so re-init is possible
+  rootLogger = pino({ level: 'debug' })
+  Object.assign(log, wrapVariadic(rootLogger))
+  currentTransport = undefined
+  logDir = undefined
+  initialized = false
+
+  if (transport) {
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, 3000)
+      transport.on('close', () => {
+        clearTimeout(timeout)
+        resolve()
+      })
+      transport.end()
+    })
+  }
 }
 
 export async function cleanupOldSessionLogs(retentionDays: number): Promise<void> {

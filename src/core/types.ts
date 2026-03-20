@@ -62,6 +62,8 @@ export type AgentEvent =
   | {
       type: "tool_update";
       id: string;
+      name?: string;
+      kind?: string;
       status: string;
       content?: unknown;
       locations?: unknown;

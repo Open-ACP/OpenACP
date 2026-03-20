@@ -282,6 +282,8 @@ export class OpenACPCore {
       case "tool_update": {
         const metadata: Record<string, unknown> = {
           id: event.id,
+          name: event.name,
+          kind: event.kind,
           status: event.status,
           content: event.content,
         };

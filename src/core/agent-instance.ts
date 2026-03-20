@@ -330,6 +330,8 @@ export class AgentInstance {
             event = {
               type: "tool_update",
               id: update.toolCallId,
+              name: update.title ?? undefined,
+              kind: update.kind ?? undefined,
               status: update.status ?? "pending",
               content: update.content ?? undefined,
               rawInput: (update as any).rawInput ?? undefined,

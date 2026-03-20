@@ -88,6 +88,7 @@ export class TelegramAdapter extends ChannelAdapter {
         kind?: string;
         viewerLinks?: { file?: string; diff?: string };
         viewerFilePath?: string;
+        ready: Promise<void>;
       }
     >
   > = new Map(); // sessionId → (toolCallId → state)
@@ -374,6 +375,22 @@ export class TelegramAdapter extends ChannelAdapter {
           content?: unknown;
           viewerLinks?: { file?: string; diff?: string };
         };
+        // Store state immediately so tool_updates can find it while sendMessage is queued
+        if (!this.toolCallMessages.has(sessionId)) {
+          this.toolCallMessages.set(sessionId, new Map());
+        }
+        let resolveReady!: () => void;
+        const ready = new Promise<void>((r) => {
+          resolveReady = r;
+        });
+        this.toolCallMessages.get(sessionId)!.set(meta.id, {
+          msgId: 0,
+          name: meta.name,
+          kind: meta.kind,
+          viewerLinks: meta.viewerLinks,
+          viewerFilePath: (content.metadata as any)?.viewerFilePath,
+          ready,
+        });
         const msg = await this.sendQueue.enqueue(() =>
           this.bot.api.sendMessage(
             this.telegramConfig.chatId,
@@ -385,16 +402,9 @@ export class TelegramAdapter extends ChannelAdapter {
             },
           ),
         );
-        if (!this.toolCallMessages.has(sessionId)) {
-          this.toolCallMessages.set(sessionId, new Map());
-        }
-        this.toolCallMessages.get(sessionId)!.set(meta.id, {
-          msgId: msg!.message_id,
-          name: meta.name,
-          kind: meta.kind,
-          viewerLinks: meta.viewerLinks,
-          viewerFilePath: (content.metadata as any)?.viewerFilePath,
-        });
+        const toolEntry = this.toolCallMessages.get(sessionId)!.get(meta.id)!;
+        toolEntry.msgId = msg!.message_id;
+        resolveReady();
         break;
       }
 
@@ -409,12 +419,16 @@ export class TelegramAdapter extends ChannelAdapter {
         };
         const toolState = this.toolCallMessages.get(sessionId)?.get(meta.id);
         if (toolState) {
-          // Carry forward viewerLinks and filePath from previous updates
+          // Wait for tool_call sendMessage to complete (provides msgId)
+          await toolState.ready;
+          // Carry forward and update state from previous updates
           const viewerLinks = meta.viewerLinks || toolState.viewerLinks;
           const viewerFilePath = (content.metadata as any)?.viewerFilePath || toolState.viewerFilePath;
           if (meta.viewerLinks) toolState.viewerLinks = meta.viewerLinks;
           if (viewerFilePath) toolState.viewerFilePath = viewerFilePath;
-          // Merge name/kind from original tool_call
+          // Update name/kind when ACP provides a better title (e.g. "Read File" → "Read README.md")
+          if (meta.name) toolState.name = meta.name;
+          if (meta.kind) toolState.kind = meta.kind;
           const merged = {
             ...meta,
             name: meta.name || toolState.name,

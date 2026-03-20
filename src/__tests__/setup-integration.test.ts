@@ -49,7 +49,16 @@ describe('runSetup integration', () => {
           ok: true,
           json: () => Promise.resolve({
             ok: true,
-            result: { first_name: 'TestBot', username: 'test_bot' },
+            result: { id: 123456, first_name: 'TestBot', username: 'test_bot' },
+          }),
+        })
+      }
+      if (url.includes('/getChatMember')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ok: true,
+            result: { status: 'administrator' },
           }),
         })
       }
@@ -78,7 +87,7 @@ describe('runSetup integration', () => {
           }),
         })
       }
-      return Promise.reject(new Error('unexpected URL'))
+      return Promise.reject(new Error(`unexpected URL: ${url}`))
     }))
   })
 

@@ -102,11 +102,13 @@ export function formatToolCall(tool: { id: string; name?: string; kind?: string;
   const si = STATUS_ICON[tool.status || ''] || '🔧'
   const ki = KIND_ICON[tool.kind || ''] || '🛠️'
   let text = `${si} ${ki} <b>${escapeHtml(tool.name || 'Tool')}</b>`
-  const details = extractContentText(tool.content)
-  if (details) {
-    text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
-  }
   text += formatViewerLinks(tool.viewerLinks, tool.viewerFilePath)
+  if (!tool.viewerLinks) {
+    const details = extractContentText(tool.content)
+    if (details) {
+      text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
+    }
+  }
   return text
 }
 
@@ -115,11 +117,13 @@ export function formatToolUpdate(update: { id: string; name?: string; kind?: str
   const ki = KIND_ICON[update.kind || ''] || '🛠️'
   const name = update.name || 'Tool'
   let text = `${si} ${ki} <b>${escapeHtml(name)}</b>`
-  const details = extractContentText(update.content)
-  if (details) {
-    text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
-  }
   text += formatViewerLinks(update.viewerLinks, update.viewerFilePath)
+  if (!update.viewerLinks) {
+    const details = extractContentText(update.content)
+    if (details) {
+      text += `\n<pre>${escapeHtml(truncateContent(details))}</pre>`
+    }
+  }
   return text
 }
 

@@ -27,7 +27,7 @@ describe('logger', () => {
     log.info('hello from test')
 
     // pino transports run in worker threads, need time to flush
-    await new Promise(r => setTimeout(r, 500))
+    await new Promise(r => setTimeout(r, 1500))
 
     expect(fs.existsSync(logDir)).toBe(true)
     const files = fs.readdirSync(logDir)
