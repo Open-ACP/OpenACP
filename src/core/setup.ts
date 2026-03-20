@@ -405,7 +405,7 @@ export async function runSetup(configManager: ConfigManager): Promise<boolean> {
       },
       sessionStore: { ttlDays: 30 },
       tunnel: {
-        enabled: false,
+        enabled: true,
         port: 3100,
         provider: "cloudflare",
         options: {},
