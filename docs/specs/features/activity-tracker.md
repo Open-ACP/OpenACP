@@ -71,6 +71,10 @@ Current bug: `MessageDraft` is only finalized on `tool_call`, `plan`, `session_e
 ```
 Agent starts processing prompt
   │
+  ├─ [FIRST EVENT — any type] ───────▶ Delete previous Usage message (rolling)
+  │                                     Finalize previous MessageDraft (bug fix)
+  │                                     (tracked via isFirstEvent flag in ActivityTracker)
+  │
   ├─ thought event ──────────────────▶ Send "💭 Thinking..." (if not already sent)
   │
   ├─ plan event ─────────────────────▶ Send/edit Plan card with checklist + [🛑 Cancel]
@@ -84,9 +88,9 @@ Agent starts processing prompt
   │
   ├─ text (first chunk) ─────────────▶ Start MessageDraft (existing behavior)
   │
-  └─ session_end ────────────────────▶ Finalize Plan card (remove Cancel button)
+  └─ session_end ────────────────────▶ Finalize Plan card (remove Cancel button) if present
+                                        Send "✅ Done" if no Plan card was emitted
                                         Send "📊 Usage" message
-                                        Delete previous Usage message if exists
 ```
 
 ---
@@ -99,16 +103,22 @@ Thin coordinator — does not replicate `sessionDrafts` or `toolCallMessages` st
 
 ```
 ActivityTracker
-  ├── onThought()              — send ThinkingIndicator if not present
-  ├── onPlan(entries)          — send/update PlanCard, delete ThinkingIndicator
+  ├── onThought()              — [first event] delete previous UsageMessage, finalize old draft;
+  │                              then send ThinkingIndicator if not present
+  ├── onPlan(entries)          — [first event if no thought] delete previous UsageMessage, finalize old draft;
+  │                              send/update PlanCard, delete ThinkingIndicator
   ├── onToolCall(name, kind, content)
-  │     └── delete ThinkingIndicator, send tool message (via existing toolCallMessages)
+  │     └── [first event if no thought/plan] delete previous UsageMessage, finalize old draft;
+  │          delete ThinkingIndicator, send tool message (via existing toolCallMessages)
   ├── onToolUpdate(id, status) — edit tool message (via existing toolCallMessages)
-  ├── onTextStart()            — delete ThinkingIndicator (if still present)
-  ├── onComplete(usage)        — finalize PlanCard, send UsageMessage, rolling delete old
+  ├── onTextStart()            — [first event if no thought/plan/tool_call] delete previous UsageMessage, finalize old draft;
+  │                              delete ThinkingIndicator (if still present)
+  ├── onComplete(usage)        — finalize PlanCard (if present); send "✅ Done" if no PlanCard; send UsageMessage
   ├── handleCancel()           — calls session.cancel(), updates PlanCard to 🛑 Cancelled
   └── destroy()                — cleanup, delete ThinkingIndicator if lingering
 ```
+
+**`onNewPrompt()` triggers on the first event of any type** (thought, plan, tool_call, or text). `ActivityTracker` tracks an `isFirstEvent` flag that resets at the start of each prompt cycle. This ensures the previous Usage message is deleted and the previous draft is finalized as soon as processing begins — not only when text arrives.
 
 ### `ThinkingIndicator`
 
@@ -246,6 +256,23 @@ User: *"giá vàng hôm nay là bao nhiêu?"*
        12k / 42k tokens · $0.03
 ```
 
+**Short task (no plan event):**
+
+```
+[0s]   💭 Thinking...
+
+       Xin chào! Tôi có thể giúp gì cho bạn?
+       (response streams in)
+
+       ✅ Done
+
+       📊 Usage
+       ▓░░░░░░░░░ 8% context
+       3k / 42k tokens · $0.01
+```
+
+When no `plan` event is emitted, `onComplete()` sends `✅ <b>Done</b>` so the user has a clear completion signal.
+
 ---
 
 ## Implementation Phases
@@ -263,13 +290,13 @@ User: *"giá vàng hôm nay là bao nhiêu?"*
 
 | Event | Before | After |
 |---|---|---|
-| `thought` | silently dropped | `tracker.onThought()` |
-| `plan` | new standalone message | `tracker.onPlan(entries)` — PlanCard |
-| `tool_call` | new message only | `tracker.onToolCall()` + existing tool message |
+| `thought` | silently dropped | `tracker.onThought()` — triggers `onNewPrompt()` on first event |
+| `plan` | new standalone message | `tracker.onPlan(entries)` — PlanCard; triggers `onNewPrompt()` on first event |
+| `tool_call` | new message only | `tracker.onToolCall()` + existing tool message; triggers `onNewPrompt()` on first event |
 | `tool_update` | edit tool message only | `tracker.onToolUpdate()` + existing edit |
-| `text` (first chunk) | start draft | `tracker.onTextStart()`, then draft |
-| `session_end` | `✅ Done` message | `tracker.onComplete(usage)` — no separate Done |
-| new prompt starts | (no handler) | `usageMessage.deletePrevious()`, `draft.finalize()` |
+| `text` (first chunk) | start draft | `tracker.onTextStart()` — triggers `onNewPrompt()` on first event, then draft |
+| `session_end` | `✅ Done` message | `tracker.onComplete(usage)` — `✅ Done` only when no PlanCard |
+| new prompt starts | (no handler) | handled via `isFirstEvent` flag inside `ActivityTracker` |
 
 **Callback routing:** `a:<action>:<sessionId>` prefix, handled before menu callbacks.
 
@@ -295,6 +322,16 @@ User: *"giá vàng hôm nay là bao nhiêu?"*
 **Proposed approach:** Trust ACP plan updates fully (Claude Code updates plan entry statuses reliably). No heuristic mapping needed in v1.
 
 **Fallback if ACP plan updates prove unreliable:** Sequential pointer — advance `▶` to next `◻` entry on each new `tool_call`, mark previous as `✅`.
+
+---
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `src/adapters/telegram/activity.ts` | Full rewrite — ThinkingIndicator, PlanCard, UsageMessage, ActivityTracker coordinator |
+| `src/adapters/telegram/formatting.ts` | Add `compact` mode to `formatToolCall`, remove `extractToolLabel` |
+| `src/adapters/telegram/adapter.ts` | Wire new ActivityTracker interface, fix MessageDraft finalization on new prompt |
 
 ---
 

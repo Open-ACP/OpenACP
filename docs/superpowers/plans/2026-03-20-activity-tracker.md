@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Spec:** `docs/specs/features/activity-tracker.md`
+
 **Goal:** Replace the monolithic Working Card with purpose-specific, independent messages (ThinkingIndicator, PlanCard, UsageMessage) that avoid Telegram's 4096-char limit, eliminate race conditions, and preserve tool call history.
 
 **Architecture:** Each message type has one responsibility and its own lifecycle. `ActivityTracker` is a thin coordinator that manages only the new message types — `sessionDrafts`, `toolCallMessages`, and `MessageDraft` in `adapter.ts` remain unchanged. The `extractToolLabel` standalone function is replaced by a `compact` mode on `formatToolCall`.
@@ -31,13 +33,13 @@ Before writing any code, verify whether `session_end` events carry usage data (t
 - [ ] **Step 1: Check OutgoingMessage types**
 
 ```bash
-grep -n "session_end\|usage\|OutgoingMessage" /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP/src/core/channel.ts | head -30
+grep -n "session_end\|usage\|OutgoingMessage" src/core/channel.ts | head -30
 ```
 
 - [ ] **Step 2: Check agent-instance event emission**
 
 ```bash
-grep -n "session_end\|usage" /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP/src/core/agent-instance.ts | head -30
+grep -n "session_end\|usage" src/core/agent-instance.ts | head -30
 ```
 
 - [ ] **Step 3: Decide usage strategy**
@@ -121,7 +123,7 @@ export function formatToolCall(
 - [ ] **Step 2: Build to verify formatting.ts has no errors**
 
 ```bash
-cd /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP && pnpm build 2>&1 | grep "formatting"
+pnpm build 2>&1 | grep "formatting"
 ```
 
 Expected: no errors from `formatting.ts`.
@@ -368,10 +370,10 @@ export class UsageMessage {
       const warning = pct >= 85 ? ' ⚠️' : ''
       lines.push(`${bar} ${pct}% context${warning}`)
       const tokenLine = `${usage.tokensUsed.toLocaleString()} / ${usage.contextSize.toLocaleString()} tokens`
-      lines.push(usage.cost ? `${tokenLine} · $${usage.cost.amount.toFixed(4)}` : tokenLine)
+      lines.push(usage.cost ? `${tokenLine} · $${parseFloat(usage.cost.amount.toFixed(4))}` : tokenLine)
     } else if (usage.tokensUsed != null) {
       const tokenLine = `${usage.tokensUsed.toLocaleString()} tokens`
-      lines.push(usage.cost ? `${tokenLine} · $${usage.cost.amount.toFixed(4)}` : tokenLine)
+      lines.push(usage.cost ? `${tokenLine} · $${parseFloat(usage.cost.amount.toFixed(4))}` : tokenLine)
     }
     if (lines.length === 0) return
     try {
@@ -410,6 +412,8 @@ export class ActivityTracker {
   private planCard?: PlanCard
   private usageMessage: UsageMessage
   private typingInterval?: ReturnType<typeof setInterval>
+  /** True until the first event of the current prompt cycle clears it. */
+  private isFirstEvent = true
 
   constructor(
     private bot: Bot,
@@ -417,6 +421,7 @@ export class ActivityTracker {
     private threadId: number,
     private sessionId: string,
     private onCancel: () => Promise<void>,
+    private onDraftFinalize: () => Promise<void>,
   ) {
     this.thinkingIndicator = new ThinkingIndicator(bot, chatId, threadId)
     this.usageMessage = new UsageMessage(bot, chatId, threadId)
@@ -430,13 +435,27 @@ export class ActivityTracker {
     }, TYPING_INTERVAL_MS)
   }
 
+  /**
+   * Called on the first event of any type per prompt cycle.
+   * Deletes previous usage message and finalizes any leftover draft.
+   * Idempotent — no-op after first call until reset.
+   */
+  async onNewPrompt(): Promise<void> {
+    if (!this.isFirstEvent) return
+    this.isFirstEvent = false
+    await this.usageMessage.deletePrevious()
+    await this.onDraftFinalize()
+  }
+
   /** Called on each thought chunk — shows static Thinking indicator if not present. */
-  onThought(): void {
+  async onThought(): Promise<void> {
+    await this.onNewPrompt()
     this.thinkingIndicator.send()
   }
 
   /** Called on plan event — creates/updates PlanCard, deletes Thinking indicator. */
   async onPlan(entries: PlanEntry[]): Promise<void> {
+    await this.onNewPrompt()
     await this.thinkingIndicator.delete()
     if (!this.planCard) {
       this.planCard = new PlanCard(
@@ -453,6 +472,7 @@ export class ActivityTracker {
 
   /** Called on tool_call event — deletes Thinking indicator. */
   async onToolCall(): Promise<void> {
+    await this.onNewPrompt()
     await this.thinkingIndicator.delete()
   }
 
@@ -463,14 +483,14 @@ export class ActivityTracker {
 
   /** Called on first text chunk — deletes Thinking indicator, stops typing. */
   async onTextStart(): Promise<void> {
+    await this.onNewPrompt()
     await this.thinkingIndicator.delete()
     this._stopTyping()
   }
 
   /**
-   * Called on session_end — finalizes PlanCard, sends Usage if data provided.
-   * Pass usage data if session_end event carries it; otherwise pass undefined
-   * and send usage from the separate 'usage' event handler in adapter.ts.
+   * Called on session_end — finalizes PlanCard (if present); sends "✅ Done" if no
+   * plan card was emitted (short text-only tasks need a completion signal); sends Usage.
    */
   async onComplete(usage?: {
     tokensUsed?: number
@@ -481,15 +501,21 @@ export class ActivityTracker {
     this._stopTyping()
     if (this.planCard) {
       await this.planCard.finalize()
+    } else {
+      // No plan card — send Done so user knows the response is complete
+      await this.bot.api
+        .sendMessage(this.chatId, '✅ <b>Done</b>', {
+          message_thread_id: this.threadId,
+          parse_mode: 'HTML',
+          disable_notification: true,
+        })
+        .catch(() => {})
     }
     if (usage) {
       await this.usageMessage.send(usage)
     }
-  }
-
-  /** Called when a new prompt starts processing — rolls (deletes) previous usage message. */
-  async onNewPrompt(): Promise<void> {
-    await this.usageMessage.deletePrevious()
+    // Reset for next prompt cycle
+    this.isFirstEvent = true
   }
 
   /** Send usage stats — called from adapter's 'usage' event handler if usage arrives separately. */
@@ -529,7 +555,7 @@ export class ActivityTracker {
 - [ ] **Step 6: Build to check for errors in activity.ts**
 
 ```bash
-cd /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP && pnpm build 2>&1 | grep -E "activity\.ts|error TS"
+pnpm build 2>&1 | grep -E "activity\.ts|error TS"
 ```
 
 Expected: errors only from `adapter.ts` referencing the old `ActivityTracker` API — those are fixed in Task 3.
@@ -568,6 +594,10 @@ private getOrCreateTracker(sessionId: string, threadId: number): ActivityTracker
       async () => {
         const session = (this.core as OpenACPCore).sessionManager.getSession(sessionId)
         await session?.cancel()
+      },
+      async () => {
+        // Finalize any leftover draft from a previous text-only response
+        await this.finalizeDraft(sessionId)
       },
     )
     this.activityTrackers.set(sessionId, tracker)
@@ -608,7 +638,7 @@ New:
 ```typescript
 case 'thought': {
   const tracker = this.getOrCreateTracker(sessionId, threadId)
-  tracker.onThought()
+  await tracker.onThought()
   break
 }
 ```
@@ -671,9 +701,7 @@ this.activityTrackers.get(sessionId)?.onToolUpdate(meta.id, meta.status)
 
 The bug: `sessionDrafts` retains the old `MessageDraft` across prompts. When the second prompt's first text chunk arrives, `sessionDrafts.has(sessionId)` is `true` → `onTextStart()` is never called → second response appends to first message.
 
-The fix: finalize the draft in `tool_call` and `plan` handlers (Step 5 and 6 above already do this). For text-only responses (no tool calls), we need an additional guard in the `text` handler. A new prompt's first text will arrive immediately after the previous `session_end` cleared `sessionDrafts` — so `!sessionDrafts.has(sessionId)` correctly identifies the first chunk. No additional change needed for text-only multi-prompt (session_end already calls `finalizeDraft`).
-
-However: add `onNewPrompt()` call on first text chunk to roll the usage message:
+The fix: `onTextStart()` now calls `onNewPrompt()` internally on the first event. `onNewPrompt()` calls `onDraftFinalize()` which calls `finalizeDraft(sessionId)` in the adapter. This covers all cases: text-only, thought-first, tool-first.
 
 Old:
 ```typescript
@@ -691,10 +719,9 @@ New:
 ```typescript
 case 'text': {
   if (!this.sessionDrafts.has(sessionId)) {
-    // First chunk of a new text response
+    // First chunk of a new text response — onTextStart() handles onNewPrompt() internally
     const tracker = this.getOrCreateTracker(sessionId, threadId)
     await tracker.onTextStart()
-    await tracker.onNewPrompt()  // delete previous usage message
   }
   let draft = this.sessionDrafts.get(sessionId)
   if (!draft) {
@@ -770,7 +797,7 @@ case 'session_end': {
 - [ ] **Step 11: Build and verify clean**
 
 ```bash
-cd /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP && pnpm build 2>&1 | tail -30
+pnpm build 2>&1 | tail -30
 ```
 
 Expected: no TypeScript errors.
@@ -789,7 +816,7 @@ git commit -m "feat(telegram): wire new ActivityTracker, fix draft finalization,
 - [ ] **Step 1: Run test suite**
 
 ```bash
-cd /Users/hieu/Documents/Companies/Lab3/opensource/OpenACP && pnpm test 2>&1
+pnpm test 2>&1
 ```
 
 Expected: all existing tests pass.
