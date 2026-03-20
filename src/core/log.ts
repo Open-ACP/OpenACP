@@ -7,7 +7,10 @@ import type { LoggingConfig } from './config.js'
 export type Logger = pino.Logger
 
 // --- Default console-only logger (pre-init) ---
-let rootLogger: pino.Logger = pino({ level: 'debug' })
+let rootLogger: pino.Logger = pino({
+  level: 'debug',
+  transport: { target: 'pino-pretty', options: { colorize: true, translateTime: 'SYS:standard' } },
+})
 let initialized = false
 let logDir: string | undefined
 
@@ -109,7 +112,16 @@ export function initLogger(config: LoggingConfig): Logger {
 }
 
 export function createChildLogger(context: { module: string; [key: string]: unknown }): Logger {
-  return rootLogger.child(context)
+  // Return a proxy that always delegates to the current rootLogger.
+  // This ensures child loggers created at module-level (before initLogger)
+  // pick up the initialized logger with pino-pretty transport.
+  return new Proxy({} as Logger, {
+    get(_target, prop, receiver) {
+      const child = rootLogger.child(context)
+      const value = Reflect.get(child, prop, receiver)
+      return typeof value === 'function' ? value.bind(child) : value
+    },
+  })
 }
 
 export function createSessionLogger(sessionId: string, parentLogger: Logger): Logger {
