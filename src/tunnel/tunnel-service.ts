@@ -3,6 +3,9 @@ import type { TunnelConfig } from '../core/config.js'
 import { createChildLogger } from '../core/log.js'
 import type { TunnelProvider } from './provider.js'
 import { CloudflareTunnelProvider } from './providers/cloudflare.js'
+import { NgrokTunnelProvider } from './providers/ngrok.js'
+import { BoreTunnelProvider } from './providers/bore.js'
+import { TailscaleTunnelProvider } from './providers/tailscale.js'
 import { ViewerStore } from './viewer-store.js'
 import { createTunnelServer } from './server.js'
 
@@ -27,6 +30,17 @@ export class TunnelService {
     const app = createTunnelServer(this.store, authToken)
 
     this.server = serve({ fetch: app.fetch, port: this.config.port })
+    // Wait for server to be listening or fail
+    await new Promise<void>((resolve, reject) => {
+      this.server!.on('listening', () => resolve())
+      this.server!.on('error', (err: NodeJS.ErrnoException) => reject(err))
+    }).catch((err) => {
+      log.warn({ err: err.message, port: this.config.port }, 'Tunnel HTTP server failed to start')
+      this.server = null
+      this.publicUrl = `http://localhost:${this.config.port}`
+      return
+    })
+    if (!this.server) return this.publicUrl
     log.info({ port: this.config.port }, 'Tunnel HTTP server started')
 
     // 2. Start tunnel provider
@@ -71,6 +85,12 @@ export class TunnelService {
     switch (name) {
       case 'cloudflare':
         return new CloudflareTunnelProvider(options)
+      case 'ngrok':
+        return new NgrokTunnelProvider(options)
+      case 'bore':
+        return new BoreTunnelProvider(options)
+      case 'tailscale':
+        return new TailscaleTunnelProvider(options)
       default:
         log.warn({ provider: name }, 'Unknown tunnel provider, falling back to cloudflare')
         return new CloudflareTunnelProvider(options)
