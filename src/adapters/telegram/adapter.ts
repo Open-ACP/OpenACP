@@ -102,6 +102,32 @@ export class TelegramAdapter extends ChannelAdapter {
       log.error({ err: rootCause }, "Telegram bot error");
     });
 
+    // Auto-retry on 429 (Too Many Requests) — waits the retry_after duration
+    // and retries the request. Applies to ALL API calls globally.
+    this.bot.api.config.use(async (prev, method, payload, signal) => {
+      const maxRetries = 3;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const result = await prev(method, payload, signal);
+        if (
+          result.ok ||
+          (result as { error_code?: number }).error_code !== 429 ||
+          attempt === maxRetries
+        ) {
+          return result;
+        }
+        const retryAfter =
+          ((result as { parameters?: { retry_after?: number } }).parameters
+            ?.retry_after ?? 5) + 1;
+        log.warn(
+          { method, retryAfter, attempt: attempt + 1 },
+          "Rate limited by Telegram, retrying",
+        );
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      }
+      // Unreachable, but satisfies TypeScript
+      return prev(method, payload, signal);
+    });
+
     // Ensure allowed_updates includes callback_query on every poll.
     // bot.start() passes allowed_updates, but grammY only sends it on the first
     // getUpdates call. Subsequent polls may omit the parameter, causing Telegram

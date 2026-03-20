@@ -7,7 +7,7 @@ export class MessageDraft {
   private lastFlush: number = 0
   private flushTimer?: ReturnType<typeof setTimeout>
   private flushPromise: Promise<void> = Promise.resolve()  // serialize flushes
-  private minInterval = 1000  // 1 second throttle
+  private minInterval = 2000  // 2 second throttle (reduces Telegram rate limits)
 
   constructor(
     private bot: Bot,
