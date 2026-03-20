@@ -46,7 +46,7 @@ const TunnelSchema = z
   .object({
     enabled: z.boolean().default(false),
     port: z.number().default(3100),
-    provider: z.enum(["cloudflare", "ngrok", "bore"]).default("cloudflare"),
+    provider: z.enum(["cloudflare", "ngrok", "bore", "tailscale"]).default("cloudflare"),
     options: z.record(z.string(), z.unknown()).default({}),
     storeTtlMinutes: z.number().default(60),
     auth: TunnelAuthSchema,
@@ -111,6 +111,14 @@ const DEFAULT_CONFIG = {
     sessionTimeoutMinutes: 60,
   },
   sessionStore: { ttlDays: 30 },
+  tunnel: {
+    enabled: true,
+    port: 3100,
+    provider: "cloudflare",
+    options: {},
+    storeTtlMinutes: 60,
+    auth: { enabled: false },
+  },
 };
 
 export class ConfigManager {
@@ -142,6 +150,24 @@ export class ConfigManager {
 
     // 3. Read and parse
     const raw = JSON.parse(fs.readFileSync(this.configPath, "utf-8"));
+
+    // 3.5. Auto-migrate: add missing sections with defaults
+    let configUpdated = false;
+    if (!raw.tunnel) {
+      raw.tunnel = {
+        enabled: true,
+        port: 3100,
+        provider: "cloudflare",
+        options: {},
+        storeTtlMinutes: 60,
+        auth: { enabled: false },
+      };
+      configUpdated = true;
+      log.info("Added tunnel section to config (enabled by default with cloudflare)");
+    }
+    if (configUpdated) {
+      fs.writeFileSync(this.configPath, JSON.stringify(raw, null, 2));
+    }
 
     // 4. Apply env var overrides
     this.applyEnvOverrides(raw);
