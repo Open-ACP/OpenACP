@@ -5,8 +5,30 @@ export interface ChannelConfig {
   [key: string]: unknown
 }
 
-export abstract class ChannelAdapter {
-  constructor(protected core: any, protected config: ChannelConfig) {}
+export interface IChannelAdapter {
+  start(): Promise<void>
+  stop(): Promise<void>
+
+  // Outgoing: core → channel
+  sendMessage(sessionId: string, content: OutgoingMessage): Promise<void>
+  sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<void>
+  sendNotification(notification: NotificationMessage): Promise<void>
+
+  // Session lifecycle on channel side
+  createSessionThread(sessionId: string, name: string): Promise<string>  // returns threadId
+  renameSessionThread(sessionId: string, newName: string): Promise<void>
+
+  // Skill commands — optional
+  sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void>
+  cleanupSkillCommands(sessionId: string): Promise<void>
+}
+
+/**
+ * Base class providing default no-op implementations for optional methods.
+ * Adapters can extend this or implement IChannelAdapter directly.
+ */
+export abstract class ChannelAdapter<TCore = unknown> implements IChannelAdapter {
+  constructor(protected core: TCore, protected config: ChannelConfig) {}
 
   abstract start(): Promise<void>
   abstract stop(): Promise<void>

@@ -30,7 +30,7 @@ describe('logger integration', () => {
     sessionLog.error({ err: new Error('test error') }, 'Prompt failed')
 
     // 4. Wait for flush (pino transports run in worker threads, need time to flush)
-    await new Promise(r => setTimeout(r, 600))
+    await new Promise(r => setTimeout(r, 1500))
 
     // 5. Verify combined log
     const combinedFile = fs.readdirSync(logDir).find(f => f.startsWith('openacp'))

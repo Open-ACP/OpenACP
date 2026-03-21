@@ -100,7 +100,7 @@ describe('MessageDraft', () => {
     expect(messageId).toBe(42)
   })
 
-  it('resets messageId when editMessageText fails', async () => {
+  it('retains messageId when editMessageText fails to avoid duplicates', async () => {
     draft.append('hello')
     await vi.advanceTimersByTimeAsync(6000)
     expect(bot.api.sendMessage).toHaveBeenCalledOnce()
@@ -109,10 +109,12 @@ describe('MessageDraft', () => {
     draft.append(' world')
     await vi.advanceTimersByTimeAsync(6000)
 
-    bot.api.sendMessage.mockResolvedValueOnce({ message_id: 99 })
+    // After edit failure, messageId is retained — next flush retries edit, not send.
+    // This prevents duplicate messages from transient errors (rate limit, network).
     draft.append('!')
     await vi.advanceTimersByTimeAsync(6000)
-    expect(bot.api.sendMessage).toHaveBeenCalledTimes(2)
+    expect(bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(bot.api.editMessageText).toHaveBeenCalledTimes(2)
   })
 
   it('finalize with empty buffer returns undefined', async () => {

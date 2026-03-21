@@ -74,7 +74,7 @@ function patchedFetch(
   return fetch(input, init);
 }
 
-export class TelegramAdapter extends ChannelAdapter {
+export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
   private bot!: Bot;
   private telegramConfig: TelegramChannelConfig;
   private sessionDrafts: Map<string, MessageDraft> = new Map();
@@ -196,7 +196,7 @@ export class TelegramAdapter extends ChannelAdapter {
       this.telegramConfig,
       async (updates) => {
         // Save topic IDs to config
-        await (this.core as OpenACPCore).configManager.save({
+        await this.core.configManager.save({
           channels: { telegram: updates },
         });
       },
@@ -209,7 +209,7 @@ export class TelegramAdapter extends ChannelAdapter {
       this.bot,
       this.telegramConfig.chatId,
       (sessionId) =>
-        (this.core as OpenACPCore).sessionManager.getSession(sessionId),
+        this.core.sessionManager.getSession(sessionId),
       (notification) => this.sendNotification(notification),
     );
 
@@ -254,8 +254,8 @@ export class TelegramAdapter extends ChannelAdapter {
 
     // Send welcome message immediately — no need to wait for assistant session
     try {
-      const config = (this.core as OpenACPCore).configManager.get();
-      const agents = (this.core as OpenACPCore).agentManager.getAvailableAgents();
+      const config = this.core.configManager.get();
+      const agents = this.core.agentManager.getAvailableAgents();
       const agentList = agents
         .map((a) => `${escapeHtml(a.name)}${a.name === config.defaultAgent ? " (default)" : ""}`)
         .join(", ");
@@ -342,14 +342,14 @@ export class TelegramAdapter extends ChannelAdapter {
       }
 
       // Session topic → send typing indicator and forward to core
-      const sessionId = (this.core as OpenACPCore).sessionManager.getSessionByThread("telegram", String(threadId))?.id;
+      const sessionId = this.core.sessionManager.getSessionByThread("telegram", String(threadId))?.id;
       if (sessionId) await this.finalizeDraft(sessionId);
       if (sessionId) {
         const tracker = this.sessionTrackers.get(sessionId)
         if (tracker) await tracker.onNewPrompt()
       }
       ctx.replyWithChatAction("typing").catch(() => {});
-      (this.core as OpenACPCore)
+      this.core
         .handleMessage({
           channelId: "telegram",
           threadId: String(threadId),
@@ -371,7 +371,7 @@ export class TelegramAdapter extends ChannelAdapter {
     if (this.assistantInitializing && sessionId === this.assistantSession?.id) return;
 
     // log.debug({ sessionId, type: content.type }, "Sending message to Telegram");
-    const session = (this.core as OpenACPCore).sessionManager.getSession(
+    const session = this.core.sessionManager.getSession(
       sessionId,
     );
     if (!session) return;
@@ -532,7 +532,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
         // Notify the Notifications topic that a prompt has completed
         if (this.notificationTopicId && sessionId !== this.assistantSession?.id) {
-          const sess = (this.core as OpenACPCore).sessionManager.getSession(sessionId)
+          const sess = this.core.sessionManager.getSession(sessionId)
           const sessionName = sess?.name || 'Session'
           const chatIdStr = String(this.telegramConfig.chatId)
           const numericId = chatIdStr.startsWith('-100') ? chatIdStr.slice(4) : chatIdStr.replace('-', '')
@@ -604,7 +604,7 @@ export class TelegramAdapter extends ChannelAdapter {
     request: PermissionRequest,
   ): Promise<void> {
     log.info({ sessionId, requestId: request.id }, "Permission request sent");
-    const session = (this.core as OpenACPCore).sessionManager.getSession(
+    const session = this.core.sessionManager.getSession(
       sessionId,
     );
     if (!session) return;
@@ -612,10 +612,9 @@ export class TelegramAdapter extends ChannelAdapter {
     // Dangerous mode: auto-approve without prompting the user
     if (session.dangerousMode) {
       const allowOption = request.options.find((o) => o.isAllow);
-      if (allowOption && session.pendingPermission?.requestId === request.id) {
+      if (allowOption && session.permissionGate.requestId === request.id) {
         log.info({ sessionId, requestId: request.id, optionId: allowOption.id }, "Dangerous mode: auto-approving permission");
-        session.pendingPermission.resolve(allowOption.id);
-        session.pendingPermission = undefined;
+        session.permissionGate.resolve(allowOption.id);
       }
       return;
     }
@@ -645,7 +644,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
     // Build deep link to session topic (Telegram supergroup format: /c/{chatId}/{threadId})
     const deepLink = notification.deepLink ?? (() => {
-      const session = (this.core as OpenACPCore).sessionManager.getSession(notification.sessionId);
+      const session = this.core.sessionManager.getSession(notification.sessionId);
       const threadId = session?.threadId;
       if (!threadId) return undefined;
       // chatId for supergroups looks like -1001234567890; strip -100 prefix
@@ -674,7 +673,7 @@ export class TelegramAdapter extends ChannelAdapter {
   }
 
   async renameSessionThread(sessionId: string, newName: string): Promise<void> {
-    const session = (this.core as OpenACPCore).sessionManager.getSession(
+    const session = this.core.sessionManager.getSession(
       sessionId,
     );
     if (!session) return;
@@ -684,7 +683,7 @@ export class TelegramAdapter extends ChannelAdapter {
       Number(session.threadId),
       newName,
     );
-    await (this.core as OpenACPCore).sessionManager.updateSessionName(
+    await this.core.sessionManager.updateSessionName(
       sessionId,
       newName,
     );
@@ -697,7 +696,7 @@ export class TelegramAdapter extends ChannelAdapter {
     // Suppress skill commands for the assistant session entirely
     if (sessionId === this.assistantSession?.id) return;
 
-    const session = (this.core as OpenACPCore).sessionManager.getSession(
+    const session = this.core.sessionManager.getSession(
       sessionId,
     );
     if (!session) return;
@@ -706,7 +705,7 @@ export class TelegramAdapter extends ChannelAdapter {
 
     // Restore skillMsgId from persisted platform data if not in memory (e.g. after restart)
     if (!this.skillMessages.has(sessionId)) {
-      const record = (this.core as OpenACPCore).sessionManager.getSessionRecord(sessionId);
+      const record = this.core.sessionManager.getSessionRecord(sessionId);
       const platform = record?.platform as import("../../core/types.js").TelegramPlatformData | undefined;
       if (platform?.skillMsgId) {
         this.skillMessages.set(sessionId, platform.skillMsgId);
@@ -758,9 +757,9 @@ export class TelegramAdapter extends ChannelAdapter {
       this.skillMessages.set(sessionId, msg!.message_id);
 
       // Persist skillMsgId so it survives restarts
-      const record = (this.core as OpenACPCore).sessionManager.getSessionRecord(sessionId);
+      const record = this.core.sessionManager.getSessionRecord(sessionId);
       if (record) {
-        await (this.core as OpenACPCore).sessionManager.updateSessionPlatform(
+        await this.core.sessionManager.updateSessionPlatform(
           sessionId,
           { ...record.platform, skillMsgId: msg!.message_id },
         );
@@ -801,10 +800,10 @@ export class TelegramAdapter extends ChannelAdapter {
     clearSkillCallbacks(sessionId);
 
     // Clear persisted skillMsgId
-    const record = (this.core as OpenACPCore).sessionManager.getSessionRecord(sessionId);
+    const record = this.core.sessionManager.getSessionRecord(sessionId);
     if (record) {
       const { skillMsgId: _removed, ...rest } = record.platform as unknown as import("../../core/types.js").TelegramPlatformData;
-      await (this.core as OpenACPCore).sessionManager.updateSessionPlatform(sessionId, rest);
+      await this.core.sessionManager.updateSessionPlatform(sessionId, rest);
     }
   }
 

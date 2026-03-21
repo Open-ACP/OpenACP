@@ -131,7 +131,7 @@ describe('runSetup integration', () => {
     expect(written.agents.claude.command).toBe('claude-agent-acp')
     expect(written.defaultAgent).toBe('claude')
     expect(written.workspace.baseDir).toBe('~/my-workspace')
-    expect(written.security.maxConcurrentSessions).toBe(5)
+    expect(written.security.maxConcurrentSessions).toBe(20)
     expect(written.security.sessionTimeoutMinutes).toBe(60)
   })
 })

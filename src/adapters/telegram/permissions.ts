@@ -85,9 +85,8 @@ export class PermissionHandler {
       const session = this.getSession(pending.sessionId)
       const isAllow = pending.options.find(o => o.id === optionId)?.isAllow ?? false
       log.info({ requestId: pending.requestId, optionId, isAllow }, 'Permission responded')
-      if (session?.pendingPermission?.requestId === pending.requestId) {
-        session.pendingPermission.resolve(optionId)
-        session.pendingPermission = undefined
+      if (session?.permissionGate.requestId === pending.requestId) {
+        session.permissionGate.resolve(optionId)
       }
       this.pending.delete(callbackKey)
 

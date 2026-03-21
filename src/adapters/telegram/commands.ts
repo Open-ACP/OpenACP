@@ -29,6 +29,8 @@ export function setupCommands(
   bot.command("menu", (ctx) => handleMenu(ctx));
   bot.command("enable_dangerous", (ctx) => handleEnableDangerous(ctx, core));
   bot.command("disable_dangerous", (ctx) => handleDisableDangerous(ctx, core));
+  bot.command("restart", (ctx) => handleRestart(ctx, core));
+  bot.command("update", (ctx) => handleUpdate(ctx, core));
 }
 
 export function buildMenuKeyboard(): InlineKeyboard {
@@ -40,7 +42,10 @@ export function buildMenuKeyboard(): InlineKeyboard {
     .text("📊 Status", "m:status")
     .row()
     .text("🤖 Agents", "m:agents")
-    .text("❓ Help", "m:help");
+    .text("❓ Help", "m:help")
+    .row()
+    .text("🔄 Restart", "m:restart")
+    .text("⬆️ Update", "m:update");
 }
 
 export function setupMenuCallbacks(
@@ -74,6 +79,12 @@ export function setupMenuCallbacks(
         break;
       case "m:help":
         await handleHelp(ctx);
+        break;
+      case "m:restart":
+        await handleRestart(ctx, core);
+        break;
+      case "m:update":
+        await handleUpdate(ctx, core);
         break;
     }
   });
@@ -322,7 +333,7 @@ async function handleStatus(ctx: Context, core: OpenACPCore): Promise<void> {
           `<b>Agent:</b> ${escapeHtml(session.agentName)}\n` +
           `<b>Status:</b> ${escapeHtml(session.status)}\n` +
           `<b>Workspace:</b> <code>${escapeHtml(session.workingDirectory)}</code>\n` +
-          `<b>Queue:</b> ${session.promptQueue.length} pending`,
+          `<b>Queue:</b> ${session.queueDepth} pending`,
         { parse_mode: "HTML" },
       );
     } else {
@@ -380,6 +391,8 @@ async function handleHelp(ctx: Context): Promise<void> {
       `/status — Show session/system status\n` +
       `/agents — List available agents\n` +
       `/menu — Show interactive menu\n` +
+      `/restart — Restart OpenACP\n` +
+      `/update — Update to latest version and restart\n` +
       `/help — Show this help\n\n` +
       `Or just chat in the 🤖 Assistant topic for help!`,
     { parse_mode: "HTML" },
@@ -438,6 +451,62 @@ async function handleEnableDangerous(ctx: Context, core: OpenACPCore): Promise<v
     `⚠️ <b>Dangerous mode enabled</b>\n\nAll permission requests will be auto-approved. Claude can run arbitrary commands without asking.\n\nUse /disable_dangerous to restore normal behaviour.`,
     { parse_mode: "HTML" },
   );
+}
+
+async function handleUpdate(ctx: Context, core: OpenACPCore): Promise<void> {
+  if (!core.requestRestart) {
+    await ctx.reply("⚠️ Update is not available (no restart handler registered).", { parse_mode: "HTML" });
+    return;
+  }
+
+  const { getCurrentVersion, getLatestVersion, compareVersions, runUpdate } = await import("../../cli/version.js");
+  const current = getCurrentVersion();
+  const statusMsg = await ctx.reply(`🔍 Checking for updates... (current: v${escapeHtml(current)})`, { parse_mode: "HTML" });
+
+  const latest = await getLatestVersion();
+  if (!latest) {
+    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, "❌ Could not check for updates.", { parse_mode: "HTML" });
+    return;
+  }
+
+  if (compareVersions(current, latest) >= 0) {
+    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `✅ Already up to date (v${escapeHtml(current)}).`, { parse_mode: "HTML" });
+    return;
+  }
+
+  await ctx.api.editMessageText(
+    ctx.chat!.id,
+    statusMsg.message_id,
+    `⬇️ Updating v${escapeHtml(current)} → v${escapeHtml(latest)}...`,
+    { parse_mode: "HTML" },
+  );
+
+  const ok = await runUpdate();
+  if (!ok) {
+    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, "❌ Update failed. Try manually: <code>npm install -g @openacp/cli@latest</code>", { parse_mode: "HTML" });
+    return;
+  }
+
+  await ctx.api.editMessageText(
+    ctx.chat!.id,
+    statusMsg.message_id,
+    `✅ Updated to v${escapeHtml(latest)}. Restarting...`,
+    { parse_mode: "HTML" },
+  );
+
+  await new Promise((r) => setTimeout(r, 500));
+  await core.requestRestart();
+}
+
+async function handleRestart(ctx: Context, core: OpenACPCore): Promise<void> {
+  if (!core.requestRestart) {
+    await ctx.reply("⚠️ Restart is not available (no restart handler registered).", { parse_mode: "HTML" });
+    return;
+  }
+  await ctx.reply("🔄 <b>Restarting OpenACP...</b>\nRebuilding and restarting. Be back shortly.", { parse_mode: "HTML" });
+  // Give Telegram a moment to deliver the message before shutting down
+  await new Promise((r) => setTimeout(r, 500));
+  await core.requestRestart();
 }
 
 async function handleDisableDangerous(ctx: Context, core: OpenACPCore): Promise<void> {
@@ -594,4 +663,6 @@ export const STATIC_COMMANDS = [
   { command: "menu", description: "Show menu" },
   { command: "enable_dangerous", description: "Auto-approve all permission requests (session only)" },
   { command: "disable_dangerous", description: "Restore normal permission prompts (session only)" },
+  { command: "restart", description: "Restart OpenACP" },
+  { command: "update", description: "Update to latest version and restart" },
 ];

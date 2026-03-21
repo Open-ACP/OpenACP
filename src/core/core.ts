@@ -6,15 +6,14 @@ import { SessionManager } from "./session-manager.js";
 import { NotificationManager } from "./notification.js";
 import { ChannelAdapter } from "./channel.js";
 import { Session } from "./session.js";
+import { MessageTransformer } from "./message-transformer.js";
 import { JsonFileSessionStore, type SessionStore } from "./session-store.js";
 import type {
   IncomingMessage,
   AgentEvent,
-  OutgoingMessage,
   PermissionRequest,
 } from "./types.js";
 import type { TunnelService } from "../tunnel/tunnel-service.js";
-import { extractFileInfo } from "../tunnel/extract-file-info.js";
 import { createChildLogger } from "./log.js";
 const log = createChildLogger({ module: "core" });
 
@@ -23,8 +22,11 @@ export class OpenACPCore {
   agentManager: AgentManager;
   sessionManager: SessionManager;
   notificationManager: NotificationManager;
+  messageTransformer: MessageTransformer;
   adapters: Map<string, ChannelAdapter> = new Map();
-  tunnelService?: TunnelService;
+  /** Set by main.ts — triggers graceful shutdown with restart exit code */
+  requestRestart: (() => Promise<void>) | null = null;
+  private _tunnelService?: TunnelService;
   private sessionStore: SessionStore | null = null;
   private resumeLocks: Map<string, Promise<Session | null>> = new Map();
 
@@ -39,6 +41,16 @@ export class OpenACPCore {
     );
     this.sessionManager = new SessionManager(this.sessionStore);
     this.notificationManager = new NotificationManager(this.adapters);
+    this.messageTransformer = new MessageTransformer();
+  }
+
+  get tunnelService(): TunnelService | undefined {
+    return this._tunnelService;
+  }
+
+  set tunnelService(service: TunnelService | undefined) {
+    this._tunnelService = service;
+    this.messageTransformer = new MessageTransformer(service);
   }
 
   registerAdapter(name: string, adapter: ChannelAdapter): void {
@@ -270,119 +282,38 @@ export class OpenACPCore {
 
   // --- Event Wiring ---
 
-  private toOutgoingMessage(
-    event: AgentEvent,
-    session?: Session,
-  ): OutgoingMessage {
-    switch (event.type) {
-      case "text":
-        return { type: "text", text: event.content };
-      case "thought":
-        return { type: "thought", text: event.content };
-      case "tool_call": {
-        const metadata: Record<string, unknown> = {
-          id: event.id,
-          name: event.name,
-          kind: event.kind,
-          status: event.status,
-          content: event.content,
-          locations: event.locations,
-        };
-        this.enrichWithViewerLinks(event, metadata, session);
-        return { type: "tool_call", text: event.name, metadata };
-      }
-      case "tool_update": {
-        const metadata: Record<string, unknown> = {
-          id: event.id,
-          name: event.name,
-          kind: event.kind,
-          status: event.status,
-          content: event.content,
-        };
-        this.enrichWithViewerLinks(event, metadata, session);
-        return { type: "tool_update", text: "", metadata };
-      }
-      case "plan":
-        return { type: "plan", text: "", metadata: { entries: event.entries } };
-      case "usage":
-        return {
-          type: "usage",
-          text: "",
-          metadata: {
-            tokensUsed: event.tokensUsed,
-            contextSize: event.contextSize,
-            cost: event.cost,
-          },
-        };
-      default:
-        return { type: "text", text: "" };
-    }
-  }
-
-  private enrichWithViewerLinks(
-    event: AgentEvent & { type: "tool_call" | "tool_update" },
-    metadata: Record<string, unknown>,
-    session?: Session,
-  ): void {
-    if (!this.tunnelService || !session) return;
-
-    const name = "name" in event ? event.name || "" : "";
-    const kind = "kind" in event ? event.kind : undefined;
-
-    log.debug(
-      { name, kind, status: event.status, hasContent: !!event.content },
-      "enrichWithViewerLinks: inspecting event",
-    );
-
-    const fileInfo = extractFileInfo(name, kind, event.content, event.rawInput, event.meta);
-    if (!fileInfo) return;
-
-    log.info(
-      {
-        name,
-        kind,
-        filePath: fileInfo.filePath,
-        hasOldContent: !!fileInfo.oldContent,
-      },
-      "enrichWithViewerLinks: extracted file info",
-    );
-
-    const store = this.tunnelService.getStore();
-    const viewerLinks: Record<string, string> = {};
-
-    // For edits/writes with diff data (oldText + newText)
-    if (fileInfo.oldContent) {
-      const id = store.storeDiff(
-        session.id,
-        fileInfo.filePath,
-        fileInfo.oldContent,
-        fileInfo.content,
-        session.workingDirectory,
-      );
-      if (id) viewerLinks.diff = this.tunnelService.diffUrl(id);
-    }
-
-    // Always store as file view (new file creation or read)
-    const id = store.storeFile(
-      session.id,
-      fileInfo.filePath,
-      fileInfo.content,
-      session.workingDirectory,
-    );
-    if (id) viewerLinks.file = this.tunnelService.fileUrl(id);
-
-    if (Object.keys(viewerLinks).length > 0) {
-      metadata.viewerLinks = viewerLinks;
-      metadata.viewerFilePath = fileInfo.filePath;
-    }
-  }
-
   // Public — adapters call this for assistant session wiring
   wireSessionEvents(session: Session, adapter: ChannelAdapter): void {
     // Set adapter reference for autoName → renameSessionThread
     session.adapter = adapter;
 
+    // Wire AgentInstance callbacks → Session event emitter
     session.agentInstance.onSessionUpdate = (event: AgentEvent) => {
+      session.emit("agent_event", event);
+    };
+
+    session.agentInstance.onPermissionRequest = async (
+      request: PermissionRequest,
+    ) => {
+      session.emit("permission_request", request);
+
+      // Set pending BEFORE sending UI to avoid race condition
+      const promise = session.permissionGate.setPending(request);
+
+      // Send permission UI to session topic (notification is sent by adapter)
+      await adapter.sendPermissionRequest(session.id, request);
+
+      // Wait for user response — adapter resolves this promise
+      return promise;
+    };
+
+    const sessionContext = {
+      get id() { return session.id; },
+      get workingDirectory() { return session.workingDirectory; },
+    };
+
+    // Subscribe to Session events for adapter delivery
+    session.on("agent_event", (event: AgentEvent) => {
       switch (event.type) {
         case "text":
         case "thought":
@@ -392,7 +323,7 @@ export class OpenACPCore {
         case "usage":
           adapter.sendMessage(
             session.id,
-            this.toOutgoingMessage(event, session),
+            this.messageTransformer.transform(event, sessionContext),
           );
           break;
 
@@ -400,10 +331,10 @@ export class OpenACPCore {
           session.status = "finished";
           this.sessionManager.updateSessionStatus(session.id, "finished");
           adapter.cleanupSkillCommands(session.id);
-          adapter.sendMessage(session.id, {
-            type: "session_end",
-            text: `Done (${event.reason})`,
-          });
+          adapter.sendMessage(
+            session.id,
+            this.messageTransformer.transform(event),
+          );
           this.notificationManager.notify(session.channelId, {
             sessionId: session.id,
             sessionName: session.name,
@@ -415,10 +346,10 @@ export class OpenACPCore {
         case "error":
           this.sessionManager.updateSessionStatus(session.id, "error");
           adapter.cleanupSkillCommands(session.id);
-          adapter.sendMessage(session.id, {
-            type: "error",
-            text: event.message,
-          });
+          adapter.sendMessage(
+            session.id,
+            this.messageTransformer.transform(event),
+          );
           this.notificationManager.notify(session.channelId, {
             sessionId: session.id,
             sessionName: session.name,
@@ -432,21 +363,6 @@ export class OpenACPCore {
           adapter.sendSkillCommands(session.id, event.commands);
           break;
       }
-    };
-
-    session.agentInstance.onPermissionRequest = async (
-      request: PermissionRequest,
-    ) => {
-      // Set pending BEFORE sending UI to avoid race condition
-      const promise = new Promise<string>((resolve) => {
-        session.pendingPermission = { requestId: request.id, resolve };
-      });
-
-      // Send permission UI to session topic (notification is sent by adapter)
-      await adapter.sendPermissionRequest(session.id, request);
-
-      // Wait for user response — adapter resolves this promise
-      return promise;
-    };
+    });
   }
 }

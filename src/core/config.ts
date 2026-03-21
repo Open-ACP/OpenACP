@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { applyMigrations } from "./config-migrations.js";
 import { createChildLogger } from "./log.js";
 const log = createChildLogger({ module: "config" });
 
@@ -157,43 +158,8 @@ export class ConfigManager {
     // 3. Read and parse
     const raw = JSON.parse(fs.readFileSync(this.configPath, "utf-8"));
 
-    // 3.5. Auto-migrate: add missing sections with defaults
-    let configUpdated = false;
-    if (!raw.tunnel) {
-      raw.tunnel = {
-        enabled: true,
-        port: 3100,
-        provider: "cloudflare",
-        options: {},
-        storeTtlMinutes: 60,
-        auth: { enabled: false },
-      };
-      configUpdated = true;
-      log.info("Added tunnel section to config (enabled by default with cloudflare)");
-    }
-    // 3.6. Auto-migrate: fix agent commands (claude → claude-agent-acp)
-    // The plain "claude" command is the CLI, not the ACP-compatible agent.
-    // Only "claude-agent-acp" speaks the ACP protocol correctly.
-    const AGENT_COMMAND_MIGRATIONS: Record<string, string[]> = {
-      "claude-agent-acp": ["claude", "claude-code"], // prefer claude-agent-acp over these
-    };
-    if (raw.agents && typeof raw.agents === "object") {
-      for (const [agentName, agentDef] of Object.entries(raw.agents)) {
-        const def = agentDef as { command?: string };
-        if (!def.command) continue;
-        for (const [correctCmd, legacyCmds] of Object.entries(AGENT_COMMAND_MIGRATIONS)) {
-          if (legacyCmds.includes(def.command)) {
-            log.warn(
-              { agent: agentName, oldCommand: def.command, newCommand: correctCmd },
-              `Auto-migrating agent command: "${def.command}" → "${correctCmd}"`,
-            );
-            def.command = correctCmd;
-            configUpdated = true;
-          }
-        }
-      }
-    }
-
+    // 3.5. Auto-migrate config
+    const { changed: configUpdated } = applyMigrations(raw);
     if (configUpdated) {
       fs.writeFileSync(this.configPath, JSON.stringify(raw, null, 2));
     }

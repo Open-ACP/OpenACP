@@ -1,11 +1,21 @@
 import { nanoid } from "nanoid";
 import type { AgentInstance } from "./agent-instance.js";
 import type { ChannelAdapter } from "./channel.js";
-import type { SessionStatus } from "./types.js";
+import type { AgentEvent, PermissionRequest, SessionStatus } from "./types.js";
+import { TypedEmitter } from "./typed-emitter.js";
+import { PromptQueue } from "./prompt-queue.js";
+import { PermissionGate } from "./permission-gate.js";
 import { createChildLogger, createSessionLogger, type Logger } from "./log.js";
 const moduleLog = createChildLogger({ module: "session" });
 
-export class Session {
+export interface SessionEvents {
+  agent_event: (event: AgentEvent) => void;
+  permission_request: (request: PermissionRequest) => void;
+  session_end: (reason: string) => void;
+  error: (error: Error) => void;
+}
+
+export class Session extends TypedEmitter<SessionEvents> {
   id: string;
   channelId: string;
   threadId: string = "";
@@ -15,16 +25,13 @@ export class Session {
   agentSessionId: string = "";
   status: SessionStatus = "initializing";
   name?: string;
-  promptQueue: string[] = [];
-  promptRunning: boolean = false;
   createdAt: Date = new Date();
   adapter?: ChannelAdapter; // Set by wireSessionEvents for renaming
-  pendingPermission?: {
-    requestId: string;
-    resolve: (optionId: string) => void;
-  };
   dangerousMode: boolean = false;
   log: Logger;
+
+  readonly permissionGate = new PermissionGate();
+  private readonly queue: PromptQueue;
 
   constructor(opts: {
     id?: string;
@@ -33,6 +40,7 @@ export class Session {
     workingDirectory: string;
     agentInstance: AgentInstance;
   }) {
+    super();
     this.id = opts.id || nanoid(12);
     this.channelId = opts.channelId;
     this.agentName = opts.agentName;
@@ -40,62 +48,91 @@ export class Session {
     this.agentInstance = opts.agentInstance;
     this.log = createSessionLogger(this.id, moduleLog);
     this.log.info({ agentName: this.agentName }, "Session created");
+
+    this.queue = new PromptQueue(
+      (text) => this.processPrompt(text),
+      (err) => {
+        this.status = "error";
+        this.log.error({ err }, "Prompt execution failed");
+      },
+    );
   }
+
+  // --- Backward-compatible properties ---
+
+  /** @deprecated Use permissionGate directly */
+  get pendingPermission():
+    | { requestId: string; resolve: (optionId: string) => void }
+    | undefined {
+    if (!this.permissionGate.isPending) return undefined;
+    return {
+      requestId: this.permissionGate.requestId!,
+      resolve: (optionId: string) => this.permissionGate.resolve(optionId),
+    };
+  }
+
+  set pendingPermission(
+    val: { requestId: string; resolve: (optionId: string) => void } | undefined,
+  ) {
+    // No-op setter for backward compatibility — permission state is managed by PermissionGate
+    // The core.ts wireSessionEvents still sets this; we ignore it.
+  }
+
+  /** Number of prompts waiting in queue */
+  get queueDepth(): number {
+    return this.queue.pending;
+  }
+
+  get promptRunning(): boolean {
+    return this.queue.isProcessing;
+  }
+
+  // --- Public API ---
 
   async enqueuePrompt(text: string): Promise<void> {
-    if (this.promptRunning) {
-      this.promptQueue.push(text);
-      this.log.debug({ queueDepth: this.promptQueue.length }, "Prompt queued");
-      return;
-    }
-    await this.runPrompt(text);
+    await this.queue.enqueue(text);
   }
 
-  private async runPrompt(text: string): Promise<void> {
-    this.promptRunning = true;
+  private async processPrompt(text: string): Promise<void> {
+    // Handle warmup sentinel
+    if (text === "\x00__warmup__") {
+      await this.runWarmup();
+      return;
+    }
+
     this.status = "active";
     const promptStart = Date.now();
     this.log.debug("Prompt execution started");
 
-    try {
-      await this.agentInstance.prompt(text);
-      this.log.info(
-        { durationMs: Date.now() - promptStart },
-        "Prompt execution completed",
-      );
+    await this.agentInstance.prompt(text);
+    this.log.info(
+      { durationMs: Date.now() - promptStart },
+      "Prompt execution completed",
+    );
 
-      // Auto-name after first user prompt
-      if (!this.name) {
-        await this.autoName();
-      }
-    } catch (err) {
-      this.status = "error";
-      this.log.error({ err }, "Prompt execution failed");
-    } finally {
-      this.promptRunning = false;
-
-      // Process next queued prompt
-      if (this.promptQueue.length > 0) {
-        const next = this.promptQueue.shift()!;
-        await this.runPrompt(next);
-      }
+    // Auto-name after first user prompt
+    if (!this.name) {
+      await this.autoName();
     }
   }
 
   // NOTE: This injects a summary prompt into the agent's conversation history.
-  // Known Phase 1 limitation — the agent sees this prompt in its context.
   private async autoName(): Promise<void> {
     let title = "";
-    const prevHandler = this.agentInstance.onSessionUpdate;
-    this.agentInstance.onSessionUpdate = (event) => {
+
+    // Intercept at the source — capture text before it reaches the emitter,
+    // so adapter listeners never see auto-name output.
+    const originalHandler = this.agentInstance.onSessionUpdate;
+    this.agentInstance.onSessionUpdate = (event: AgentEvent) => {
       if (event.type === "text") title += event.content;
+      // Swallow all events from auto-name prompt
     };
 
     try {
       await this.agentInstance.prompt(
         "Summarize this conversation in max 5 words for a topic title. Reply ONLY with the title, nothing else.",
       );
-      this.name = title.trim().slice(0, 50);
+      this.name = title.trim().slice(0, 50) || `Session ${this.id.slice(0, 6)}`;
       this.log.info({ name: this.name }, "Session auto-named");
 
       // Rename the topic on the channel
@@ -105,44 +142,41 @@ export class Session {
     } catch {
       this.name = `Session ${this.id.slice(0, 6)}`;
     } finally {
-      this.agentInstance.onSessionUpdate = prevHandler;
+      this.agentInstance.onSessionUpdate = originalHandler;
     }
   }
 
   /** Fire-and-forget warm-up: primes model cache while user types their first message */
   async warmup(): Promise<void> {
-    this.promptRunning = true;
-    const prevHandler = this.agentInstance.onSessionUpdate;
-    // Suppress display events during warmup, but let commands_update pass through
-    // so skill commands are shown after the warmup completes.
-    this.agentInstance.onSessionUpdate = (event) => {
-      if (event.type === "commands_update") prevHandler(event);
-    };
+    // Route through PromptQueue to prevent concurrent prompt execution.
+    // Any user prompts arriving during warmup will be queued and drained after.
+    await this.queue.enqueue("\x00__warmup__");
+  }
+
+  private async runWarmup(): Promise<void> {
+    // Pause events but let commands_update pass through
+    this.pause((_event, args) => {
+      const agentEvent = args[0] as AgentEvent;
+      return agentEvent?.type === "commands_update";
+    });
 
     try {
       const start = Date.now();
       await this.agentInstance.prompt('Reply with only "ready".');
-      this.status = 'active';
+      this.status = "active";
       this.log.info({ durationMs: Date.now() - start }, "Warm-up complete");
     } catch (err) {
       this.log.error({ err }, "Warm-up failed");
     } finally {
-      this.agentInstance.onSessionUpdate = prevHandler;
-      this.promptRunning = false;
-
-      // Drain any prompts queued while warming up
-      if (this.promptQueue.length > 0) {
-        const next = this.promptQueue.shift()!;
-        await this.runPrompt(next);
-      }
+      this.clearBuffer();
+      this.resume();
     }
   }
 
   async cancel(): Promise<void> {
-    this.promptQueue = [];
+    this.queue.clear();
     this.log.info("Session cancelled");
     await this.agentInstance.cancel();
-    this.promptRunning = false;
     this.status = "active";
   }
 
