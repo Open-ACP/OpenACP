@@ -717,7 +717,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     const existingMsgId = this.skillMessages.get(sessionId);
 
     if (existingMsgId) {
-      // Update existing pinned message (first chunk only, remove extra if any)
+      // Update existing pinned message
       try {
         await this.bot.api.editMessageText(
           this.telegramConfig.chatId,
@@ -726,8 +726,17 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
           { parse_mode: "HTML" },
         );
         return;
-      } catch {
-        // Message may have been deleted — fall through to create new
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.includes("message is not modified")) {
+          // Content unchanged — nothing to do
+          return;
+        }
+        // Message may have been deleted or format changed — clean up and create new
+        try {
+          await this.bot.api.deleteMessage(this.telegramConfig.chatId, existingMsgId);
+        } catch { /* already gone */ }
+        this.skillMessages.delete(sessionId);
       }
     }
 
