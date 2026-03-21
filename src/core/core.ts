@@ -247,6 +247,7 @@ export class OpenACPCore {
         session.agentSessionId = agentInstance.sessionId;
         session.status = "active";
         session.name = record.name;
+        session.dangerousMode = record.dangerousMode ?? false;
 
         this.sessionManager.registerSession(session);
 
