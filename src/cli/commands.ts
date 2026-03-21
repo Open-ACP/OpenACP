@@ -60,14 +60,8 @@ Examples:
 }
 
 export async function cmdVersion(): Promise<void> {
-  try {
-    const { createRequire } = await import("node:module")
-    const require = createRequire(import.meta.url)
-    const pkg = require("../../package.json")
-    console.log(`openacp v${pkg.version}`)
-  } catch {
-    console.log("openacp v0.0.0-dev")
-  }
+  const { getCurrentVersion } = await import("./version.js")
+  console.log(`openacp v${getCurrentVersion()}`)
 }
 
 export async function cmdInstall(args: string[]): Promise<void> {
