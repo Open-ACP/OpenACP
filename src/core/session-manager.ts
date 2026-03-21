@@ -102,6 +102,14 @@ export class SessionManager {
     }
   }
 
+  async updateSessionDangerousMode(sessionId: string, dangerousMode: boolean): Promise<void> {
+    if (!this.store) return;
+    const record = this.store.get(sessionId);
+    if (record) {
+      await this.store.save({ ...record, dangerousMode });
+    }
+  }
+
   async updateSessionName(sessionId: string, name: string): Promise<void> {
     if (!this.store) return;
     const record = this.store.get(sessionId);

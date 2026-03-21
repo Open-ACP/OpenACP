@@ -416,22 +416,45 @@ export function setupDangerousModeCallbacks(bot: Bot, core: OpenACPCore): void {
   bot.callbackQuery(/^d:/, async (ctx) => {
     const sessionId = ctx.callbackQuery.data.slice(2);
     const session = core.sessionManager.getSession(sessionId);
-    if (!session) {
+
+    // Session live in memory — toggle directly
+    if (session) {
+      session.dangerousMode = !session.dangerousMode;
+      log.info({ sessionId, dangerousMode: session.dangerousMode }, "Dangerous mode toggled via button");
+      core.sessionManager.updateSessionDangerousMode(sessionId, session.dangerousMode).catch(() => {});
+
+      const toastText = session.dangerousMode
+        ? "☠️ Dangerous mode enabled — permissions auto-approved"
+        : "🔐 Dangerous mode disabled — permissions shown normally";
+      try { await ctx.answerCallbackQuery({ text: toastText }); } catch { /* expired */ }
+
+      try {
+        await ctx.editMessageReplyMarkup({
+          reply_markup: buildDangerousModeKeyboard(sessionId, session.dangerousMode),
+        });
+      } catch { /* ignore */ }
+      return;
+    }
+
+    // Session not in memory (e.g. after restart) — toggle directly in store
+    const record = core.sessionManager.getSessionRecord(sessionId);
+    if (!record || record.status === "cancelled" || record.status === "error") {
       try { await ctx.answerCallbackQuery({ text: "⚠️ Session not found or already ended." }); } catch { /* expired */ }
       return;
     }
 
-    session.dangerousMode = !session.dangerousMode;
-    log.info({ sessionId, dangerousMode: session.dangerousMode }, "Dangerous mode toggled via button");
+    const newDangerousMode = !(record.dangerousMode ?? false);
+    core.sessionManager.updateSessionDangerousMode(sessionId, newDangerousMode).catch(() => {});
+    log.info({ sessionId, dangerousMode: newDangerousMode }, "Dangerous mode toggled via button (store-only, session not in memory)");
 
-    const toastText = session.dangerousMode
+    const toastText = newDangerousMode
       ? "☠️ Dangerous mode enabled — permissions auto-approved"
       : "🔐 Dangerous mode disabled — permissions shown normally";
     try { await ctx.answerCallbackQuery({ text: toastText }); } catch { /* expired */ }
 
     try {
       await ctx.editMessageReplyMarkup({
-        reply_markup: buildDangerousModeKeyboard(sessionId, session.dangerousMode),
+        reply_markup: buildDangerousModeKeyboard(sessionId, newDangerousMode),
       });
     } catch { /* ignore */ }
   });
@@ -444,15 +467,26 @@ async function handleEnableDangerous(ctx: Context, core: OpenACPCore): Promise<v
     return;
   }
   const session = core.sessionManager.getSessionByThread("telegram", String(threadId));
-  if (!session) {
-    await ctx.reply("⚠️ No active session in this topic.", { parse_mode: "HTML" });
-    return;
+  if (session) {
+    if (session.dangerousMode) {
+      await ctx.reply("☠️ Dangerous mode is already enabled.", { parse_mode: "HTML" });
+      return;
+    }
+    session.dangerousMode = true;
+    core.sessionManager.updateSessionDangerousMode(session.id, true).catch(() => {});
+  } else {
+    // Session not in memory (e.g. after restart) — update store directly
+    const record = core.sessionManager.getRecordByThread("telegram", String(threadId));
+    if (!record || record.status === "cancelled" || record.status === "error") {
+      await ctx.reply("⚠️ No active session in this topic.", { parse_mode: "HTML" });
+      return;
+    }
+    if (record.dangerousMode) {
+      await ctx.reply("☠️ Dangerous mode is already enabled.", { parse_mode: "HTML" });
+      return;
+    }
+    core.sessionManager.updateSessionDangerousMode(record.sessionId, true).catch(() => {});
   }
-  if (session.dangerousMode) {
-    await ctx.reply("☠️ Dangerous mode is already enabled.", { parse_mode: "HTML" });
-    return;
-  }
-  session.dangerousMode = true;
   await ctx.reply(
     `⚠️ <b>Dangerous mode enabled</b>\n\nAll permission requests will be auto-approved. Claude can run arbitrary commands without asking.\n\nUse /disable_dangerous to restore normal behaviour.`,
     { parse_mode: "HTML" },
@@ -522,15 +556,26 @@ async function handleDisableDangerous(ctx: Context, core: OpenACPCore): Promise<
     return;
   }
   const session = core.sessionManager.getSessionByThread("telegram", String(threadId));
-  if (!session) {
-    await ctx.reply("⚠️ No active session in this topic.", { parse_mode: "HTML" });
-    return;
+  if (session) {
+    if (!session.dangerousMode) {
+      await ctx.reply("🔐 Dangerous mode is already disabled.", { parse_mode: "HTML" });
+      return;
+    }
+    session.dangerousMode = false;
+    core.sessionManager.updateSessionDangerousMode(session.id, false).catch(() => {});
+  } else {
+    // Session not in memory (e.g. after restart) — update store directly
+    const record = core.sessionManager.getRecordByThread("telegram", String(threadId));
+    if (!record || record.status === "cancelled" || record.status === "error") {
+      await ctx.reply("⚠️ No active session in this topic.", { parse_mode: "HTML" });
+      return;
+    }
+    if (!record.dangerousMode) {
+      await ctx.reply("🔐 Dangerous mode is already disabled.", { parse_mode: "HTML" });
+      return;
+    }
+    core.sessionManager.updateSessionDangerousMode(record.sessionId, false).catch(() => {});
   }
-  if (!session.dangerousMode) {
-    await ctx.reply("🔐 Dangerous mode is already disabled.", { parse_mode: "HTML" });
-    return;
-  }
-  session.dangerousMode = false;
   await ctx.reply("🔐 <b>Dangerous mode disabled</b>\n\nPermission requests will be shown normally.", { parse_mode: "HTML" });
 }
 

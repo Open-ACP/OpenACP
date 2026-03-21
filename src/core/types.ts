@@ -112,6 +112,7 @@ export interface SessionRecord<P = Record<string, unknown>> {
   createdAt: string;
   lastActiveAt: string;
   name?: string;
+  dangerousMode?: boolean;
   platform: P;
 }
 
