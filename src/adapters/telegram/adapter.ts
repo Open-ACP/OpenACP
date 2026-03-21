@@ -31,6 +31,7 @@ import {
   spawnAssistant,
   handleAssistantMessage,
   redirectToAssistant,
+  buildWelcomeMessage,
   type SpawnAssistantResult,
 } from "./assistant.js";
 import {
@@ -304,19 +305,15 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     try {
       const config = this.core.configManager.get();
       const agents = this.core.agentManager.getAvailableAgents();
-      const agentList = agents
-        .map((a) => `${escapeHtml(a.name)}${a.name === config.defaultAgent ? " (default)" : ""}`)
-        .join(", ");
-      const workspace = escapeHtml(config.workspace.baseDir);
       const allRecords = this.core.sessionManager.listRecords();
-      const activeCount = allRecords.filter(r => r.status === 'active' || r.status === 'initializing').length;
 
-      const welcomeText =
-        `👋 <b>OpenACP Assistant</b> is online.\n\n` +
-        `Available agents: ${agentList}\n` +
-        `Workspace: <code>${workspace}</code>\n` +
-        `Sessions: ${activeCount} active / ${allRecords.length} total\n\n` +
-        `<b>Select an action:</b>`;
+      const welcomeText = buildWelcomeMessage({
+        activeCount: allRecords.filter(r => r.status === 'active' || r.status === 'initializing').length,
+        errorCount: allRecords.filter(r => r.status === 'error').length,
+        totalCount: allRecords.length,
+        agents: agents.map(a => a.name),
+        defaultAgent: config.defaultAgent,
+      });
 
       await this.bot.api.sendMessage(this.telegramConfig.chatId, welcomeText, {
         message_thread_id: this.assistantTopicId,

@@ -64,6 +64,44 @@ export interface AssistantContext {
   topicSummary: { status: string; count: number }[]
 }
 
+export interface WelcomeContext {
+  activeCount: number;
+  errorCount: number;
+  totalCount: number;
+  agents: string[];
+  defaultAgent: string;
+}
+
+export function buildWelcomeMessage(ctx: WelcomeContext): string {
+  const { activeCount, errorCount, totalCount, agents, defaultAgent } = ctx;
+
+  const agentList = agents
+    .map((a) => `${a}${a === defaultAgent ? " (default)" : ""}`)
+    .join(", ");
+
+  // Variant 1: No sessions
+  if (totalCount === 0) {
+    return `👋 <b>OpenACP is ready!</b>\n\nNo sessions yet. Tap 🆕 New Session to start, or ask me anything!`;
+  }
+
+  // Variant 2: Has errors
+  if (errorCount > 0) {
+    return (
+      `👋 <b>OpenACP is ready!</b>\n\n` +
+      `📊 ${activeCount} active, ${errorCount} errors / ${totalCount} total\n` +
+      `⚠️ ${errorCount} session${errorCount > 1 ? "s have" : " has"} errors — ask me to check if you'd like.\n\n` +
+      `Agents: ${agentList}`
+    );
+  }
+
+  // Variant 3/4: Has active or fallback
+  return (
+    `👋 <b>OpenACP is ready!</b>\n\n` +
+    `📊 ${activeCount} active / ${totalCount} total\n` +
+    `Agents: ${agentList}`
+  );
+}
+
 export function buildAssistantSystemPrompt(ctx: AssistantContext): string {
   const { config, activeSessionCount, totalSessionCount, topicSummary } = ctx
   const agentNames = Object.keys(config.agents).join(", ")
