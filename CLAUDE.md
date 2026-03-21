@@ -71,3 +71,13 @@ Published as `@openacp/cli` on npm. Users install with `npm install -g @openacp/
 
 - ESM-only (`"type": "module"`), all imports use `.js` extension
 - TypeScript strict mode, target ES2022, NodeNext module resolution
+
+## Backward Compatibility
+
+Users đã cài và chạy các version cũ sẽ có config, data, storage ở trạng thái cũ. Khi thêm hoặc thay đổi bất kỳ thứ gì liên quan, **phải đảm bảo tương thích ngược**:
+
+- **Config** (`~/.openacp/config.json`): Khi thêm field mới vào Zod schema, luôn đặt `.default()` hoặc `.optional()` để config cũ không bị validation error. Không bao giờ đổi tên hoặc xóa field mà không có migration.
+- **Storage / Data files** (`~/.openacp/`): Khi thay đổi format dữ liệu (sessions, topics, state...), phải handle được format cũ — đọc được data cũ và tự động migrate sang format mới nếu cần. Không được crash khi gặp data từ version trước.
+- **CLI flags & commands**: Không xóa hoặc đổi tên command/flag đang có. Nếu deprecate thì vẫn giữ hoạt động và log warning.
+- **Plugin API**: Khi thay đổi interface mà plugin dùng, phải giữ backward compat hoặc bump major version.
+- **Nguyên tắc chung**: Code mới phải chạy được với data/config cũ mà không cần user làm gì thêm. Nếu cần migration, tự động chạy khi khởi động.

@@ -18,6 +18,8 @@ import {
   cmdReset,
   cmdUpdate,
   cmdDefault,
+  cmdAdopt,
+  cmdIntegrate,
 } from './cli/commands.js'
 
 const args = process.argv.slice(2);
@@ -39,6 +41,8 @@ const commands: Record<string, () => Promise<void>> = {
   'config': () => cmdConfig(),
   'reset': () => cmdReset(),
   'update': () => cmdUpdate(),
+  'adopt': () => cmdAdopt(args),
+  'integrate': () => cmdIntegrate(args),
   '--daemon-child': async () => {
     const { startServer } = await import('./main.js')
     await startServer()

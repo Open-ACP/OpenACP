@@ -236,6 +236,49 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     );
     this.permissionHandler.setupCallbackHandler();
 
+    // /handoff — show CLI resume command for the session in this topic
+    this.bot.command("handoff", async (ctx) => {
+      const threadId = ctx.message?.message_thread_id;
+      if (!threadId) return;
+
+      // Don't work in system topics
+      if (threadId === this.notificationTopicId || threadId === this.assistantTopicId) {
+        await ctx.reply("This command only works in session topics.", {
+          message_thread_id: threadId,
+        });
+        return;
+      }
+
+      const session = this.core.sessionManager.getSessionByThread("telegram", String(threadId));
+      if (!session) {
+        await ctx.reply("No active session in this topic.", {
+          message_thread_id: threadId,
+        });
+        return;
+      }
+
+      const { getAgentCapabilities } = await import("../../core/agent-registry.js");
+      const caps = getAgentCapabilities(session.agentName);
+
+      if (!caps.supportsResume || !caps.resumeCommand) {
+        await ctx.reply("This agent does not support CLI handoff.", {
+          message_thread_id: threadId,
+        });
+        return;
+      }
+
+      const agentSessionId = session.agentSessionId;
+      const command = caps.resumeCommand(agentSessionId);
+
+      await ctx.reply(
+        `Resume this session on CLI:\n\n<code>${command}</code>`,
+        {
+          message_thread_id: threadId,
+          parse_mode: "HTML",
+        },
+      );
+    });
+
     // Setup message routing
     this.setupRoutes();
 
@@ -605,6 +648,16 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       sessionId,
     );
     if (!session) return;
+
+    // Auto-approve openacp CLI commands for all sessions
+    if (request.description.includes("openacp")) {
+      const allowOption = request.options.find((o) => o.isAllow);
+      if (allowOption && session.permissionGate.requestId === request.id) {
+        log.info({ sessionId, requestId: request.id }, "Auto-approving openacp command");
+        session.permissionGate.resolve(allowOption.id);
+      }
+      return;
+    }
 
     // Dangerous mode: auto-approve without prompting the user
     if (session.dangerousMode) {

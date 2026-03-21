@@ -8,6 +8,7 @@ import { ConfigManager } from '../core/config.js'
 vi.mock('@inquirer/prompts', () => ({
   input: vi.fn(),
   select: vi.fn(),
+  confirm: vi.fn(),
 }))
 
 // Mock child_process for agent detection
@@ -26,11 +27,12 @@ vi.mock('../core/autostart.js', () => ({
   installAutoStart: vi.fn(() => ({ success: true })),
 }))
 
-import { input, select } from '@inquirer/prompts'
+import { input, select, confirm } from '@inquirer/prompts'
 import { runSetup } from '../core/setup.js'
 
 const mockedInput = vi.mocked(input)
 const mockedSelect = vi.mocked(select)
+const mockedConfirm = vi.mocked(confirm)
 
 describe('runSetup integration', () => {
   let tmpDir: string
@@ -113,6 +115,10 @@ describe('runSetup integration', () => {
       ]
       return Promise.resolve(responses[inputCallIndex++])
     }) as any)
+
+    // Confirm call order:
+    // 1. Claude CLI integration prompt (decline to avoid needing ClaudeIntegration mock)
+    mockedConfirm.mockResolvedValueOnce(false as any)
 
     // Select call order:
     // 1. setupRunMode: run mode selection

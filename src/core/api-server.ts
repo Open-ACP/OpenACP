@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import type { OpenACPCore } from './core.js'
 import type { TopicManager } from './topic-manager.js'
 import { createChildLogger } from './log.js'
+import { getAgentCapabilities } from './agent-registry.js'
 
 const log = createChildLogger({ module: 'api-server' })
 
@@ -120,7 +121,9 @@ export class ApiServer {
     const url = req.url || ''
 
     try {
-      if (method === 'POST' && url === '/api/sessions') {
+      if (method === 'POST' && url === '/api/sessions/adopt') {
+        await this.handleAdoptSession(req, res)
+      } else if (method === 'POST' && url === '/api/sessions') {
         await this.handleCreateSession(req, res)
       } else if (method === 'POST' && url.match(/^\/api\/sessions\/([^/]+)\/prompt$/)) {
         const sessionId = decodeURIComponent(url.match(/^\/api\/sessions\/([^/]+)\/prompt$/)![1])
@@ -508,17 +511,43 @@ export class ApiServer {
     })
   }
 
+  private async handleAdoptSession(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const body = await this.readBody(req)
+    if (!body) {
+      return this.sendJson(res, 400, { error: 'bad_request', message: 'Empty request body' })
+    }
+
+    let parsed: { agent?: string; agentSessionId?: string; cwd?: string }
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      return this.sendJson(res, 400, { error: 'bad_request', message: 'Invalid JSON' })
+    }
+
+    const { agent, agentSessionId, cwd } = parsed
+
+    if (!agent || !agentSessionId) {
+      return this.sendJson(res, 400, { error: 'bad_request', message: 'Missing required fields: agent, agentSessionId' })
+    }
+
+    const result = await this.core.adoptSession(agent, agentSessionId, cwd ?? process.cwd())
+
+    if (result.ok) {
+      return this.sendJson(res, 200, result)
+    } else {
+      const status = result.error === 'session_limit' ? 429 : result.error === 'agent_not_supported' ? 400 : 500
+      return this.sendJson(res, status, result)
+    }
+  }
+
   private async handleListAgents(res: http.ServerResponse): Promise<void> {
     const agents = this.core.agentManager.getAvailableAgents()
     const defaultAgent = this.core.configManager.get().defaultAgent
-    this.sendJson(res, 200, {
-      agents: agents.map(a => ({
-        name: a.name,
-        command: a.command,
-        args: a.args,
-      })),
-      default: defaultAgent,
-    })
+    const agentsWithCaps = agents.map((a) => ({
+      ...a,
+      capabilities: getAgentCapabilities(a.name),
+    }))
+    this.sendJson(res, 200, { agents: agentsWithCaps, default: defaultAgent })
   }
 
   private sendJson(res: http.ServerResponse, status: number, data: unknown): void {

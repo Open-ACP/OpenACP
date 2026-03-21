@@ -14,6 +14,7 @@ import type {
   PermissionRequest,
 } from "./types.js";
 import type { TunnelService } from "../tunnel/tunnel-service.js";
+import { getAgentCapabilities } from "./agent-registry.js";
 import { createChildLogger } from "./log.js";
 const log = createChildLogger({ module: "core" });
 
@@ -177,6 +178,126 @@ export class OpenACPCore {
     }
 
     return session;
+  }
+
+  async adoptSession(
+    agentName: string,
+    agentSessionId: string,
+    cwd: string,
+  ): Promise<
+    | { ok: true; sessionId: string; threadId: string; status: "adopted" | "existing" }
+    | { ok: false; error: string; message: string }
+  > {
+    // 1. Validate agent supports resume
+    const caps = getAgentCapabilities(agentName);
+    if (!caps.supportsResume) {
+      return { ok: false, error: "agent_not_supported", message: `Agent '${agentName}' does not support session resume` };
+    }
+
+    const agentDef = this.agentManager.getAgent(agentName);
+    if (!agentDef) {
+      return { ok: false, error: "agent_not_supported", message: `Agent '${agentName}' not found` };
+    }
+
+    // 2. Validate cwd
+    const { existsSync } = await import("node:fs");
+    if (!existsSync(cwd)) {
+      return { ok: false, error: "invalid_cwd", message: `Directory does not exist: ${cwd}` };
+    }
+
+    // 3. Check session limit
+    const maxSessions = this.configManager.get().security.maxConcurrentSessions;
+    if (this.sessionManager.listSessions().length >= maxSessions) {
+      return { ok: false, error: "session_limit", message: "Maximum concurrent sessions reached" };
+    }
+
+    // 4. Check if session already exists
+    const existingRecord = this.sessionManager.getRecordByAgentSessionId(agentSessionId);
+    if (existingRecord) {
+      const platform = existingRecord.platform as { topicId?: number } | undefined;
+      if (platform?.topicId) {
+        // Ping the topic to surface it
+        const adapter = this.adapters.values().next().value;
+        if (adapter) {
+          try {
+            await adapter.sendMessage(existingRecord.sessionId, {
+              type: "text",
+              text: "Session resumed from CLI.",
+            });
+          } catch {
+            // Topic may be deleted, ignore
+          }
+        }
+        return {
+          ok: true,
+          sessionId: existingRecord.sessionId,
+          threadId: String(platform.topicId),
+          status: "existing",
+        };
+      }
+    }
+
+    // 5. Spawn agent and resume
+    let agentInstance;
+    try {
+      agentInstance = await this.agentManager.resume(agentName, cwd, agentSessionId);
+    } catch (err) {
+      return {
+        ok: false,
+        error: "resume_failed",
+        message: `Failed to resume session: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    // 6. Create session
+    const session = new Session({
+      channelId: "api",
+      agentName,
+      workingDirectory: cwd,
+      agentInstance,
+    });
+    session.agentSessionId = agentInstance.sessionId;
+
+    this.sessionManager.registerSession(session);
+
+    // 7. Create topic on default adapter
+    const firstEntry = this.adapters.entries().next().value;
+    if (!firstEntry) {
+      await session.destroy();
+      return { ok: false, error: "no_adapter", message: "No channel adapter registered" };
+    }
+    const [adapterChannelId, adapter] = firstEntry;
+
+    const threadId = await adapter.createSessionThread(session.id, session.name ?? "Adopted session");
+    session.channelId = adapterChannelId;
+    session.threadId = threadId;
+
+    // 8. Wire events
+    this.wireSessionEvents(session, adapter);
+
+    // 9. Persist to store — must explicitly save (registerSession only adds to memory)
+    if (this.sessionStore) {
+      await this.sessionStore.save({
+        sessionId: session.id,
+        agentSessionId: agentInstance.sessionId,
+        originalAgentSessionId: agentSessionId,
+        agentName,
+        workingDir: cwd,
+        channelId: adapterChannelId,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        name: session.name,
+        platform: { topicId: Number(threadId) },
+      });
+    }
+
+    return {
+      ok: true,
+      sessionId: session.id,
+      threadId,
+      status: "adopted",
+    };
   }
 
   async handleNewChat(

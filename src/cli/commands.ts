@@ -21,6 +21,8 @@ Usage:
   openacp --foreground                 Force foreground mode
   openacp --version                    Show version
   openacp --help                       Show this help
+  adopt <agent> <id>                   Adopt an external agent session into OpenACP
+  integrate <agent>                    Install/uninstall CLI integration for an agent
 
 API (requires running daemon):
   openacp api status                       Show active sessions
@@ -579,6 +581,87 @@ export async function cmdUpdate(): Promise<void> {
   } else {
     console.error('Update failed. Try manually: npm install -g @openacp/cli@latest')
     process.exit(1)
+  }
+}
+
+export async function cmdAdopt(args: string[]): Promise<void> {
+  const agent = args[1];
+  const sessionId = args[2];
+
+  if (!agent || !sessionId) {
+    console.log("Usage: openacp adopt <agent> <session_id> [--cwd <path>]");
+    console.log("Example: openacp adopt claude abc123-def456 --cwd /path/to/project");
+    process.exit(1);
+  }
+
+  const cwdIdx = args.indexOf("--cwd");
+  const cwd = cwdIdx !== -1 && args[cwdIdx + 1] ? args[cwdIdx + 1] : process.cwd();
+
+  const port = readApiPort();
+  if (!port) {
+    console.log("OpenACP is not running. Start it with: openacp start");
+    process.exit(1);
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions/adopt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent, agentSessionId: sessionId, cwd }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+
+    if (data.ok) {
+      if (data.status === "existing") {
+        console.log(`Session already on Telegram. Topic pinged.`);
+      } else {
+        console.log(`Session transferred to Telegram.`);
+      }
+      console.log(`  Session ID: ${data.sessionId}`);
+      console.log(`  Thread ID:  ${data.threadId}`);
+    } else {
+      console.log(`Error: ${(data.message as string) || (data.error as string)}`);
+      process.exit(1);
+    }
+  } catch (err) {
+    console.log(`Failed to connect to OpenACP: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  }
+}
+
+export async function cmdIntegrate(args: string[]): Promise<void> {
+  const { getIntegration, listIntegrations } = await import("./integrate.js");
+
+  const agent = args[1];
+  const uninstall = args.includes("--uninstall");
+
+  if (!agent) {
+    console.log("Usage: openacp integrate <agent> [--uninstall]");
+    console.log(`Available integrations: ${listIntegrations().join(", ")}`);
+    process.exit(1);
+  }
+
+  const integration = getIntegration(agent);
+  if (!integration) {
+    console.log(`No integration available for '${agent}'.`);
+    console.log(`Available: ${listIntegrations().join(", ")}`);
+    process.exit(1);
+  }
+
+  try {
+    if (uninstall) {
+      console.log(`Removing ${agent} CLI integration...`);
+      await integration.uninstall();
+      console.log(`\n${agent} CLI integration removed.`);
+    } else {
+      console.log(`Installing ${agent} CLI integration...`);
+      await integration.install();
+      console.log(`\n${agent} CLI integration installed.`);
+      console.log(`  Use /openacp:handoff in Claude CLI to hand off sessions.`);
+    }
+  } catch (err) {
+    console.log(`Error: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
   }
 }
 
