@@ -12,6 +12,7 @@ export interface SessionStore {
     channelId: string,
     predicate: (platform: Record<string, unknown>) => boolean,
   ): SessionRecord | undefined;
+  findByAgentSessionId(agentSessionId: string): SessionRecord | undefined;
   list(channelId?: string): SessionRecord[];
   remove(sessionId: string): Promise<void>;
 }
@@ -69,6 +70,14 @@ export class JsonFileSessionStore implements SessionStore {
       }
     }
     return undefined;
+  }
+
+  findByAgentSessionId(agentSessionId: string): SessionRecord | undefined {
+    return [...this.records.values()].find(
+      (r) =>
+        r.agentSessionId === agentSessionId ||
+        r.originalAgentSessionId === agentSessionId,
+    );
   }
 
   list(channelId?: string): SessionRecord[] {

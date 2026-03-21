@@ -58,6 +58,19 @@ export class SessionManager {
     return undefined;
   }
 
+  getSessionByAgentSessionId(agentSessionId: string): Session | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.agentSessionId === agentSessionId) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
+  getRecordByAgentSessionId(agentSessionId: string): import("./types.js").SessionRecord | undefined {
+    return this.store?.findByAgentSessionId(agentSessionId);
+  }
+
   getRecordByThread(channelId: string, threadId: string): import("./types.js").SessionRecord | undefined {
     return this.store?.findByPlatform(
       channelId,

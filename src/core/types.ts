@@ -105,6 +105,7 @@ export type SessionStatus =
 export interface SessionRecord<P = Record<string, unknown>> {
   sessionId: string;
   agentSessionId: string;
+  originalAgentSessionId?: string;
   agentName: string;
   workingDir: string;
   channelId: string;
