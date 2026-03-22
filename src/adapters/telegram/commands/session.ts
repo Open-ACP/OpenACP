@@ -32,7 +32,7 @@ export async function handleCancel(
   );
   if (session) {
     log.info({ sessionId: session.id }, "Cancel session command");
-    await session.cancel();
+    await session.abortPrompt();
     await ctx.reply("⛔ Session cancelled.", { parse_mode: "HTML" });
     return;
   }
@@ -324,7 +324,7 @@ export async function executeCancelSession(
   const session = sessions[0];
   if (!session) return null;
 
-  await session.cancel();
+  await session.abortPrompt();
   return session;
 }
 

@@ -1,7 +1,6 @@
 import type { AgentManager } from "./agent-manager.js";
 import { Session } from "./session.js";
 import type { SessionStore } from "./session-store.js";
-import type { SessionStatus } from "./types.js";
 
 export class SessionManager {
   private sessions: Map<string, Session> = new Map();
@@ -83,54 +82,20 @@ export class SessionManager {
     this.sessions.set(session.id, session);
   }
 
-  async updateSessionPlatform(
+  async patchRecord(
     sessionId: string,
-    platform: Record<string, unknown>,
+    patch: Partial<import("./types.js").SessionRecord>,
   ): Promise<void> {
     if (!this.store) return;
     const record = this.store.get(sessionId);
     if (record) {
-      await this.store.save({ ...record, platform });
+      await this.store.save({ ...record, ...patch });
+    } else if (patch.sessionId) {
+      // Initial save — treat patch as full record
+      await this.store.save(patch as import("./types.js").SessionRecord);
     }
   }
 
-  async updateSessionActivity(sessionId: string): Promise<void> {
-    if (!this.store) return;
-    const record = this.store.get(sessionId);
-    if (record) {
-      await this.store.save({
-        ...record,
-        lastActiveAt: new Date().toISOString(),
-      });
-    }
-  }
-
-  async updateSessionStatus(
-    sessionId: string,
-    status: SessionStatus,
-  ): Promise<void> {
-    if (!this.store) return;
-    const record = this.store.get(sessionId);
-    if (record) {
-      await this.store.save({ ...record, status });
-    }
-  }
-
-  async updateSessionDangerousMode(sessionId: string, dangerousMode: boolean): Promise<void> {
-    if (!this.store) return;
-    const record = this.store.get(sessionId);
-    if (record) {
-      await this.store.save({ ...record, dangerousMode });
-    }
-  }
-
-  async updateSessionName(sessionId: string, name: string): Promise<void> {
-    if (!this.store) return;
-    const record = this.store.get(sessionId);
-    if (record) {
-      await this.store.save({ ...record, name });
-    }
-  }
 
   getSessionRecord(sessionId: string): import("./types.js").SessionRecord | undefined {
     return this.store?.get(sessionId);
@@ -139,7 +104,8 @@ export class SessionManager {
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (session) {
-      await session.cancel();
+      await session.abortPrompt();
+      session.markCancelled();
     }
     if (this.store) {
       const record = this.store.get(sessionId);

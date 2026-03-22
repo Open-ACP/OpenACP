@@ -38,7 +38,7 @@ const commands: Record<string, () => Promise<void>> = {
   'stop': () => cmdStop(),
   'status': () => cmdStatus(),
   'logs': () => cmdLogs(),
-  'config': () => cmdConfig(),
+  'config': () => cmdConfig(args),
   'reset': () => cmdReset(),
   'update': () => cmdUpdate(),
   'adopt': () => cmdAdopt(args),

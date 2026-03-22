@@ -1,6 +1,5 @@
 import { nanoid } from "nanoid";
 import type { AgentInstance } from "./agent-instance.js";
-import type { ChannelAdapter } from "./channel.js";
 import type { AgentEvent, PermissionRequest, SessionStatus } from "./types.js";
 import { TypedEmitter } from "./typed-emitter.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -8,10 +7,21 @@ import { PermissionGate } from "./permission-gate.js";
 import { createChildLogger, createSessionLogger, type Logger } from "./log.js";
 const moduleLog = createChildLogger({ module: "session" });
 
+// Valid state transitions: from → Set<to>
+const VALID_TRANSITIONS: Record<SessionStatus, Set<SessionStatus>> = {
+  initializing: new Set(["active", "error"]),
+  active: new Set(["error", "finished", "cancelled"]),
+  error: new Set(["active"]),
+  cancelled: new Set(["active"]),
+  finished: new Set(),
+};
+
 export interface SessionEvents {
   agent_event: (event: AgentEvent) => void;
   permission_request: (request: PermissionRequest) => void;
   session_end: (reason: string) => void;
+  status_change: (from: SessionStatus, to: SessionStatus) => void;
+  named: (name: string) => void;
   error: (error: Error) => void;
 }
 
@@ -23,10 +33,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   workingDirectory: string;
   agentInstance: AgentInstance;
   agentSessionId: string = "";
-  status: SessionStatus = "initializing";
+  private _status: SessionStatus = "initializing";
   name?: string;
   createdAt: Date = new Date();
-  adapter?: ChannelAdapter; // Set by wireSessionEvents for renaming
   dangerousMode: boolean = false;
   log: Logger;
 
@@ -52,30 +61,52 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.queue = new PromptQueue(
       (text) => this.processPrompt(text),
       (err) => {
-        this.status = "error";
+        this.fail("Prompt execution failed");
         this.log.error({ err }, "Prompt execution failed");
       },
     );
   }
 
-  // --- Backward-compatible properties ---
+  // --- State Machine ---
 
-  /** @deprecated Use permissionGate directly */
-  get pendingPermission():
-    | { requestId: string; resolve: (optionId: string) => void }
-    | undefined {
-    if (!this.permissionGate.isPending) return undefined;
-    return {
-      requestId: this.permissionGate.requestId!,
-      resolve: (optionId: string) => this.permissionGate.resolve(optionId),
-    };
+  get status(): SessionStatus {
+    return this._status;
   }
 
-  set pendingPermission(
-    val: { requestId: string; resolve: (optionId: string) => void } | undefined,
-  ) {
-    // No-op setter for backward compatibility — permission state is managed by PermissionGate
-    // The core.ts wireSessionEvents still sets this; we ignore it.
+
+  /** Transition to active — from initializing, error, or cancelled */
+  activate(): void {
+    this.transition("active");
+  }
+
+  /** Transition to error — from initializing or active */
+  fail(reason: string): void {
+    this.transition("error");
+    this.emit("error", new Error(reason));
+  }
+
+  /** Transition to finished — from active only. Emits session_end for backward compat. */
+  finish(reason?: string): void {
+    this.transition("finished");
+    this.emit("session_end", reason ?? "completed");
+  }
+
+  /** Transition to cancelled — from active only (terminal session cancel) */
+  markCancelled(): void {
+    this.transition("cancelled");
+  }
+
+  private transition(to: SessionStatus): void {
+    const from = this._status;
+    const allowed = VALID_TRANSITIONS[from];
+    if (!allowed?.has(to)) {
+      throw new Error(
+        `Invalid session transition: ${from} → ${to}`,
+      );
+    }
+    this._status = to;
+    this.log.debug({ from, to }, "Session status transition");
+    this.emit("status_change", from, to);
   }
 
   /** Number of prompts waiting in queue */
@@ -100,7 +131,9 @@ export class Session extends TypedEmitter<SessionEvents> {
       return;
     }
 
-    this.status = "active";
+    if (this._status === "initializing") {
+      this.activate();
+    }
     const promptStart = Date.now();
     this.log.debug("Prompt execution started");
 
@@ -135,10 +168,8 @@ export class Session extends TypedEmitter<SessionEvents> {
       this.name = title.trim().slice(0, 50) || `Session ${this.id.slice(0, 6)}`;
       this.log.info({ name: this.name }, "Session auto-named");
 
-      // Rename the topic on the channel
-      if (this.adapter && this.name) {
-        await this.adapter.renameSessionThread(this.id, this.name);
-      }
+      // Emit named event — SessionBridge listens to rename the thread
+      this.emit("named", this.name);
     } catch {
       this.name = `Session ${this.id.slice(0, 6)}`;
     } finally {
@@ -163,7 +194,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     try {
       const start = Date.now();
       await this.agentInstance.prompt('Reply with only "ready".');
-      this.status = "active";
+      this.activate();
       this.log.info({ durationMs: Date.now() - start }, "Warm-up complete");
     } catch (err) {
       this.log.error({ err }, "Warm-up failed");
@@ -173,11 +204,11 @@ export class Session extends TypedEmitter<SessionEvents> {
     }
   }
 
-  async cancel(): Promise<void> {
+  /** Cancel the current prompt and clear the queue. Stays in active state. */
+  async abortPrompt(): Promise<void> {
     this.queue.clear();
-    this.log.info("Session cancelled");
+    this.log.info("Prompt aborted");
     await this.agentInstance.cancel();
-    this.status = "active";
   }
 
   async destroy(): Promise<void> {

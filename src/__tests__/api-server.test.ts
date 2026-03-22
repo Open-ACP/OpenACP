@@ -17,12 +17,14 @@ describe('ApiServer', () => {
 
   const mockCore = {
     handleNewSession: vi.fn(),
+    createSession: vi.fn(),
     wireSessionEvents: vi.fn(),
     sessionManager: {
       getSession: vi.fn(),
       listSessions: vi.fn(() => []),
       listRecords: vi.fn(() => []),
-      updateSessionDangerousMode: vi.fn(),
+      updateSessionDangerousMode: vi.fn(), // legacy — kept for backward compat tests
+      patchRecord: vi.fn(),
     },
     agentManager: {
       getAvailableAgents: vi.fn(() => []),
@@ -30,10 +32,22 @@ describe('ApiServer', () => {
     configManager: {
       get: vi.fn(() => ({
         defaultAgent: 'claude',
-        security: { maxConcurrentSessions: 5 },
-        channels: { telegram: { botToken: 'secret-token' } },
+        agents: { claude: { command: 'claude', args: [], workingDirectory: '/tmp/ws' } },
+        security: { maxConcurrentSessions: 5, sessionTimeoutMinutes: 60, allowedUserIds: [] },
+        channels: { telegram: { enabled: false, botToken: 'secret-token', chatId: 0 } },
+        workspace: { baseDir: '~/openacp-workspace' },
+        logging: { level: 'info', logDir: '~/.openacp/logs', maxFileSize: '10m', maxFiles: 7, sessionLogRetentionDays: 30 },
+        tunnel: { enabled: true, port: 3100, provider: 'cloudflare', options: {}, storeTtlMinutes: 60, auth: { enabled: false } },
+        sessionStore: { ttlDays: 30 },
+        runMode: 'foreground',
+        autoStart: false,
+        api: { port: 21420, host: '127.0.0.1' },
+        integrations: {},
       })),
       save: vi.fn(),
+      resolveWorkspace: vi.fn(() => '/tmp/ws'),
+      on: vi.fn(),
+      emit: vi.fn(),
     },
     adapters: new Map(),
     notificationManager: { notifyAll: vi.fn() },
@@ -100,7 +114,7 @@ describe('ApiServer', () => {
   it('POST /api/sessions creates a session', async () => {
     const mockAgentInstance = { onPermissionRequest: vi.fn() }
     const mockSession = { id: 'abc123', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined), agentInstance: mockAgentInstance }
-    mockCore.handleNewSession.mockResolvedValueOnce(mockSession)
+    mockCore.createSession.mockResolvedValueOnce(mockSession)
     const port = await startServer()
 
     const res = await apiFetch(port, '/api/sessions', {
@@ -115,7 +129,9 @@ describe('ApiServer', () => {
     expect(data.agent).toBe('claude')
     expect(data.status).toBe('initializing')
     expect(data.workspace).toBe('/tmp/ws')
-    expect(mockCore.handleNewSession).toHaveBeenCalledWith('api', 'claude', undefined)
+    expect(mockCore.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: 'api', agentName: 'claude' }),
+    )
     expect(mockSession.warmup).toHaveBeenCalled()
     // Verify auto-approve permission handler was wired
     expect(mockAgentInstance.onPermissionRequest).toBeTypeOf('function')
@@ -123,12 +139,14 @@ describe('ApiServer', () => {
 
   it('POST /api/sessions with empty body uses defaults', async () => {
     const mockSession = { id: 'def456', agentName: 'claude', status: 'initializing', workingDirectory: '/tmp/ws', warmup: vi.fn().mockResolvedValue(undefined), agentInstance: { onPermissionRequest: vi.fn() } }
-    mockCore.handleNewSession.mockResolvedValueOnce(mockSession)
+    mockCore.createSession.mockResolvedValueOnce(mockSession)
     const port = await startServer()
 
     const res = await apiFetch(port, '/api/sessions', { method: 'POST' })
     expect(res.status).toBe(200)
-    expect(mockCore.handleNewSession).toHaveBeenCalledWith('api', undefined, undefined)
+    expect(mockCore.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ channelId: 'api' }),
+    )
   })
 
   it('POST /api/sessions returns 429 when max sessions reached', async () => {
@@ -145,7 +163,7 @@ describe('ApiServer', () => {
   })
 
   it('DELETE /api/sessions/:id cancels a session', async () => {
-    const mockSession = { id: 'abc123', cancel: vi.fn() }
+    const mockSession = { id: 'abc123', abortPrompt: vi.fn() }
     mockCore.sessionManager.getSession.mockReturnValueOnce(mockSession)
     const port = await startServer()
 
@@ -153,7 +171,7 @@ describe('ApiServer', () => {
     expect(res.status).toBe(200)
     const data = await res.json()
     expect(data.ok).toBe(true)
-    expect(mockSession.cancel).toHaveBeenCalled()
+    expect(mockSession.abortPrompt).toHaveBeenCalled()
   })
 
   it('DELETE /api/sessions/:id returns 404 for unknown session', async () => {
@@ -478,7 +496,7 @@ describe('ApiServer', () => {
     expect(data.ok).toBe(true)
     expect(data.dangerousMode).toBe(true)
     expect(mockSession.dangerousMode).toBe(true)
-    expect(mockCore.sessionManager.updateSessionDangerousMode).toHaveBeenCalledWith('abc123', true)
+    expect(mockCore.sessionManager.patchRecord).toHaveBeenCalledWith('abc123', { dangerousMode: true })
   })
 
   it('PATCH /api/sessions/:id/dangerous returns 400 for missing enabled', async () => {
@@ -581,7 +599,7 @@ describe('ApiServer', () => {
     expect(res.status).toBe(200)
     const data = await res.json()
     expect(data.ok).toBe(true)
-    expect(mockCore.configManager.save).toHaveBeenCalledWith({ defaultAgent: 'codex' })
+    expect(mockCore.configManager.save).toHaveBeenCalledWith({ defaultAgent: 'codex' }, 'defaultAgent')
   })
 
   it('PATCH /api/config returns 400 for missing path', async () => {
@@ -596,5 +614,51 @@ describe('ApiServer', () => {
     expect(res.status).toBe(400)
     const data = await res.json()
     expect(data.error).toContain('Missing path')
+  })
+
+  it('GET /api/config/editable returns safe fields with values', async () => {
+    const port = await startServer()
+    const res = await apiFetch(port, '/api/config/editable')
+    expect(res.status).toBe(200)
+    const data = await res.json() as any
+    expect(data.fields).toBeInstanceOf(Array)
+    expect(data.fields.length).toBeGreaterThan(0)
+
+    for (const field of data.fields) {
+      expect(field.path).toBeTruthy()
+      expect(field.displayName).toBeTruthy()
+      expect(field.type).toBeTruthy()
+      expect(field.value).toBeDefined()
+    }
+
+    const agentField = data.fields.find((f: any) => f.path === 'defaultAgent')
+    expect(agentField).toBeDefined()
+    expect(agentField.type).toBe('select')
+    expect(agentField.options).toContain('claude')
+    expect(agentField.value).toBe('claude')
+  })
+
+  it('PATCH /api/config uses registry for needsRestart', async () => {
+    const port = await startServer()
+
+    // Hot-reloadable field — should NOT need restart
+    const res1 = await apiFetch(port, '/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'security.maxConcurrentSessions', value: 10 }),
+    })
+    const data1 = await res1.json() as any
+    expect(data1.ok).toBe(true)
+    expect(data1.needsRestart).toBe(false)
+
+    // Non-hot-reloadable field — should need restart
+    const res2 = await apiFetch(port, '/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'tunnel.enabled', value: false }),
+    })
+    const data2 = await res2.json() as any
+    expect(data2.ok).toBe(true)
+    expect(data2.needsRestart).toBe(true)
   })
 })

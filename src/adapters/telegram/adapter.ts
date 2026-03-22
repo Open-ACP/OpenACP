@@ -11,7 +11,6 @@ import {
 import { createChildLogger } from "../../core/log.js";
 const log = createChildLogger({ module: "telegram" });
 import type { TelegramChannelConfig } from "./types.js";
-import { MessageDraft } from "./streaming.js";
 import {
   ensureTopics,
   createSessionTopic,
@@ -23,7 +22,6 @@ import {
   setupDangerousModeCallbacks,
   setupIntegrateCallbacks,
   buildMenuKeyboard,
-  buildSkillMessages,
   handlePendingWorkspaceInput,
   STATIC_COMMANDS,
 } from "./commands/index.js";
@@ -35,19 +33,15 @@ import {
   buildWelcomeMessage,
   type SpawnAssistantResult,
 } from "./assistant.js";
-import {
-  escapeHtml,
-  formatToolCall,
-  formatToolUpdate,
-} from "./formatting.js";
+import { escapeHtml } from "./formatting.js";
 import { ActivityTracker } from "./activity.js";
 import { TelegramSendQueue } from "./send-queue.js";
 import {
-  detectAction,
-  storeAction,
-  buildActionKeyboard,
   setupActionCallbacks,
 } from "./action-detect.js";
+import { ToolCallTracker } from "./tool-call-tracker.js";
+import { DraftManager } from "./draft-manager.js";
+import { SkillCommandManager } from "./skill-command-manager.js";
 
 /**
  * Wraps native fetch to work around grammY's polyfilled AbortController.
@@ -78,43 +72,31 @@ function patchedFetch(
 export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
   private bot!: Bot;
   private telegramConfig: TelegramChannelConfig;
-  private sessionDrafts: Map<string, MessageDraft> = new Map();
-  private sessionTextBuffers: Map<string, string> = new Map();
-  private toolCallMessages: Map<
-    string,
-    Map<
-      string,
-      {
-        msgId: number;
-        name: string;
-        kind?: string;
-        viewerLinks?: { file?: string; diff?: string };
-        viewerFilePath?: string;
-        ready: Promise<void>;
-      }
-    >
-  > = new Map(); // sessionId → (toolCallId → state)
   private permissionHandler!: PermissionHandler;
   private assistantSession: Session | null = null;
   private assistantInitializing = false;
   private notificationTopicId!: number;
   private assistantTopicId!: number;
-  private skillMessages: Map<string, number> = new Map(); // sessionId → pinned messageId
-  private sendQueue = new TelegramSendQueue(3000)
-  private sessionTrackers: Map<string, ActivityTracker> = new Map()
+  private sendQueue = new TelegramSendQueue(3000);
+
+  // Extracted managers
+  private toolTracker!: ToolCallTracker;
+  private draftManager!: DraftManager;
+  private skillManager!: SkillCommandManager;
+  private sessionTrackers: Map<string, ActivityTracker> = new Map();
 
   private getOrCreateTracker(sessionId: string, threadId: number): ActivityTracker {
-    let tracker = this.sessionTrackers.get(sessionId)
+    let tracker = this.sessionTrackers.get(sessionId);
     if (!tracker) {
       tracker = new ActivityTracker(
         this.bot.api,
         this.telegramConfig.chatId,
         threadId,
         this.sendQueue,
-      )
-      this.sessionTrackers.set(sessionId, tracker)
+      );
+      this.sessionTrackers.set(sessionId, tracker);
     }
-    return tracker
+    return tracker;
   }
 
   constructor(core: OpenACPCore, config: TelegramChannelConfig) {
@@ -125,14 +107,23 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
   async start(): Promise<void> {
     this.bot = new Bot(this.telegramConfig.botToken, { client: { fetch: patchedFetch } });
 
+    // Initialize extracted managers
+    this.toolTracker = new ToolCallTracker(this.bot, this.telegramConfig.chatId, this.sendQueue);
+    this.draftManager = new DraftManager(this.bot, this.telegramConfig.chatId, this.sendQueue);
+    this.skillManager = new SkillCommandManager(
+      this.bot,
+      this.telegramConfig.chatId,
+      this.sendQueue,
+      this.core.sessionManager,
+    );
+
     // Global error handler — prevent unhandled errors from crashing the bot
     this.bot.catch((err) => {
       const rootCause = err.error instanceof Error ? err.error : err;
       log.error({ err: rootCause }, "Telegram bot error");
     });
 
-    // Auto-retry on 429 (Too Many Requests) — waits the retry_after duration
-    // and retries the request. Applies to ALL API calls globally.
+    // Auto-retry on 429 (Too Many Requests)
     this.bot.api.config.use(async (prev, method, payload, signal) => {
       const maxRetries = 3;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -147,7 +138,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         const retryAfter =
           ((result as { parameters?: { retry_after?: number } }).parameters
             ?.retry_after ?? 5) + 1;
-        // Drop pending text items on message-related 429
         const rateLimitedMethods = ['sendMessage', 'editMessageText', 'editMessageReplyMarkup'];
         if (rateLimitedMethods.includes(method)) {
           this.sendQueue.onRateLimited();
@@ -158,15 +148,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         );
         await new Promise((r) => setTimeout(r, retryAfter * 1000));
       }
-      // Unreachable, but satisfies TypeScript
       return prev(method, payload, signal);
     });
 
-    // Ensure allowed_updates includes callback_query on every poll.
-    // bot.start() passes allowed_updates, but grammY only sends it on the first
-    // getUpdates call. Subsequent polls may omit the parameter, causing Telegram
-    // to fall back to its default (which excludes callback_query). This transformer
-    // guarantees callback_query is always requested.
+    // Ensure allowed_updates includes callback_query on every poll
     this.bot.api.config.use((prev, method, payload, signal) => {
       if (method === "getUpdates") {
         const p = payload as never as Record<string, unknown>;
@@ -178,7 +163,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       return prev(method, payload, signal);
     });
 
-    // Register static commands for Telegram autocomplete (scoped to this chat)
+    // Register static commands for Telegram autocomplete
     await this.bot.api.setMyCommands(STATIC_COMMANDS, {
       scope: { type: "chat", chat_id: this.telegramConfig.chatId },
     });
@@ -196,7 +181,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       this.telegramConfig.chatId,
       this.telegramConfig,
       async (updates) => {
-        // Save topic IDs to config
         await this.core.configManager.save({
           channels: { telegram: updates },
         });
@@ -205,7 +189,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     this.notificationTopicId = topics.notificationTopicId;
     this.assistantTopicId = topics.assistantTopicId;
 
-    // Setup permission handler (instance only, callback registered later)
+    // Setup permission handler
     this.permissionHandler = new PermissionHandler(
       this.bot,
       this.telegramConfig.chatId,
@@ -215,7 +199,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     );
 
     // Callback registration order matters!
-    // Specific regex handlers first, catch-all last.
     setupDangerousModeCallbacks(this.bot, this.core as OpenACPCore);
     setupActionCallbacks(
       this.bot,
@@ -229,6 +212,13 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       this.core as OpenACPCore,
       this.telegramConfig.chatId,
       { notificationTopicId: this.notificationTopicId, assistantTopicId: this.assistantTopicId },
+      () => {
+        if (!this.assistantSession) return undefined;
+        return {
+          topicId: this.assistantTopicId,
+          enqueuePrompt: (p: string) => this.assistantSession!.enqueuePrompt(p),
+        };
+      },
     );
     setupCommands(
       this.bot,
@@ -255,12 +245,11 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     );
     this.permissionHandler.setupCallbackHandler();
 
-    // /handoff — show terminal command to continue this session locally
+    // /handoff command
     this.bot.command("handoff", async (ctx) => {
       const threadId = ctx.message?.message_thread_id;
       if (!threadId) return;
 
-      // Don't work in system topics
       if (threadId === this.notificationTopicId || threadId === this.assistantTopicId) {
         await ctx.reply("This command only works in session topics.", {
           message_thread_id: threadId,
@@ -268,7 +257,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         return;
       }
 
-      // Try in-memory session first, then fallback to persisted store
       const session = this.core.sessionManager.getSessionByThread("telegram", String(threadId));
       const record = session ? undefined : this.core.sessionManager.getRecordByThread("telegram", String(threadId));
 
@@ -316,7 +304,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         ),
     });
 
-    // Send welcome message immediately — no need to wait for assistant session
+    // Send welcome message
     try {
       const config = this.core.configManager.get();
       const agents = this.core.agentManager.getAvailableAgents();
@@ -339,8 +327,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       log.warn({ err }, "Failed to send welcome message");
     }
 
-    // Spawn assistant in background — system prompt runs without blocking startup.
-    // Messages are suppressed via assistantInitializing until the prompt completes.
+    // Spawn assistant in background
     try {
       log.info("Spawning assistant session...");
       const { session, ready } = await spawnAssistant(
@@ -395,13 +382,13 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       // Notification topic → ignore
       if (threadId === this.notificationTopicId) return;
 
-      // Assistant topic → send typing indicator and forward to assistant session
+      // Assistant topic → forward to assistant session
       if (threadId === this.assistantTopicId) {
         if (!this.assistantSession) {
           await ctx.reply("⚠️ Assistant is not available yet. Please try again shortly.", { parse_mode: "HTML" });
           return;
         }
-        await this.finalizeDraft(this.assistantSession.id);
+        await this.draftManager.finalize(this.assistantSession.id, this.assistantSession.id);
         ctx.replyWithChatAction("typing").catch(() => {});
         handleAssistantMessage(this.assistantSession, ctx.message.text).catch(
           (err) => log.error({ err }, "Assistant error"),
@@ -409,12 +396,12 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         return;
       }
 
-      // Session topic → send typing indicator and forward to core
+      // Session topic → forward to core
       const sessionId = this.core.sessionManager.getSessionByThread("telegram", String(threadId))?.id;
-      if (sessionId) await this.finalizeDraft(sessionId);
+      if (sessionId) await this.draftManager.finalize(sessionId, this.assistantSession?.id);
       if (sessionId) {
-        const tracker = this.sessionTrackers.get(sessionId)
-        if (tracker) await tracker.onNewPrompt()
+        const tracker = this.sessionTrackers.get(sessionId);
+        if (tracker) await tracker.onNewPrompt();
       }
       ctx.replyWithChatAction("typing").catch(() => {});
       this.core
@@ -434,14 +421,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     sessionId: string,
     content: OutgoingMessage,
   ): Promise<void> {
-    // Suppress all messages from the assistant session while it is processing
-    // its background system prompt — those responses are not for the user.
+    // Suppress assistant messages during system prompt
     if (this.assistantInitializing && sessionId === this.assistantSession?.id) return;
 
-    // log.debug({ sessionId, type: content.type }, "Sending message to Telegram");
-    const session = this.core.sessionManager.getSession(
-      sessionId,
-    );
+    const session = this.core.sessionManager.getSession(sessionId);
     if (!session) return;
     const threadId = Number(session.threadId);
     if (!threadId || isNaN(threadId)) {
@@ -451,37 +434,26 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
 
     switch (content.type) {
       case "thought": {
-        const tracker = this.getOrCreateTracker(sessionId, threadId)
-        await tracker.onThought()
+        const tracker = this.getOrCreateTracker(sessionId, threadId);
+        await tracker.onThought();
         break;
       }
 
       case "text": {
-        let draft = this.sessionDrafts.get(sessionId);
-        if (!draft) {
-          const tracker = this.getOrCreateTracker(sessionId, threadId)
-          await tracker.onTextStart()
-          draft = new MessageDraft(
-            this.bot,
-            this.telegramConfig.chatId,
-            threadId,
-            this.sendQueue,
-            sessionId,
-          );
-          this.sessionDrafts.set(sessionId, draft);
+        if (!this.draftManager.hasDraft(sessionId)) {
+          const tracker = this.getOrCreateTracker(sessionId, threadId);
+          await tracker.onTextStart();
         }
+        const draft = this.draftManager.getOrCreate(sessionId, threadId);
         draft.append(content.text);
-        this.sessionTextBuffers.set(
-          sessionId,
-          (this.sessionTextBuffers.get(sessionId) ?? '') + content.text,
-        );
+        this.draftManager.appendText(sessionId, content.text);
         break;
       }
 
       case "tool_call": {
-        const tracker = this.getOrCreateTracker(sessionId, threadId)
-        await tracker.onToolCall()
-        await this.finalizeDraft(sessionId);
+        const tracker = this.getOrCreateTracker(sessionId, threadId);
+        await tracker.onToolCall();
+        await this.draftManager.finalize(sessionId, this.assistantSession?.id);
         const meta = content.metadata as never as {
           id: string;
           name: string;
@@ -490,36 +462,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
           content?: unknown;
           viewerLinks?: { file?: string; diff?: string };
         };
-        // Store state immediately so tool_updates can find it while sendMessage is queued
-        if (!this.toolCallMessages.has(sessionId)) {
-          this.toolCallMessages.set(sessionId, new Map());
-        }
-        let resolveReady!: () => void;
-        const ready = new Promise<void>((r) => {
-          resolveReady = r;
-        });
-        this.toolCallMessages.get(sessionId)!.set(meta.id, {
-          msgId: 0,
-          name: meta.name,
-          kind: meta.kind,
-          viewerLinks: meta.viewerLinks,
+        await this.toolTracker.trackNewCall(sessionId, threadId, {
+          ...meta,
           viewerFilePath: (content.metadata as any)?.viewerFilePath,
-          ready,
         });
-        const msg = await this.sendQueue.enqueue(() =>
-          this.bot.api.sendMessage(
-            this.telegramConfig.chatId,
-            formatToolCall(meta),
-            {
-              message_thread_id: threadId,
-              parse_mode: "HTML",
-              disable_notification: true,
-            },
-          ),
-        );
-        const toolEntry = this.toolCallMessages.get(sessionId)!.get(meta.id)!;
-        toolEntry.msgId = msg!.message_id;
-        resolveReady();
         break;
       }
 
@@ -532,65 +478,25 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
           content?: unknown;
           viewerLinks?: { file?: string; diff?: string };
         };
-        const toolState = this.toolCallMessages.get(sessionId)?.get(meta.id);
-        if (toolState) {
-          // Accumulate state from intermediate updates
-          if (meta.viewerLinks) {
-            toolState.viewerLinks = meta.viewerLinks;
-            log.debug({ toolId: meta.id, viewerLinks: meta.viewerLinks }, "Accumulated viewerLinks");
-          }
-          const viewerFilePath = (content.metadata as any)?.viewerFilePath;
-          if (viewerFilePath) toolState.viewerFilePath = viewerFilePath;
-          if (meta.name) toolState.name = meta.name;
-          if (meta.kind) toolState.kind = meta.kind;
-          // Only edit on terminal status (completed/failed) — minimizes API calls to avoid rate limits.
-          // Viewer links are accumulated in toolState and included in the terminal edit.
-          const isTerminal = meta.status === "completed" || meta.status === "failed";
-          if (!isTerminal) break;
-          await toolState.ready;
-          log.debug(
-            { toolId: meta.id, status: meta.status, hasViewerLinks: !!toolState.viewerLinks, viewerLinks: toolState.viewerLinks, name: toolState.name, msgId: toolState.msgId },
-            "Tool completed, preparing edit",
-          );
-          const merged = {
-            ...meta,
-            name: toolState.name,
-            kind: toolState.kind,
-            viewerLinks: toolState.viewerLinks,
-            viewerFilePath: toolState.viewerFilePath,
-          };
-          const formattedText = formatToolUpdate(merged);
-          try {
-            await this.sendQueue.enqueue(() =>
-              this.bot.api.editMessageText(
-                this.telegramConfig.chatId,
-                toolState.msgId,
-                formattedText,
-                { parse_mode: "HTML" },
-              ),
-            );
-          } catch (err) {
-            log.warn(
-              { err, msgId: toolState.msgId, textLen: formattedText.length, hasViewerLinks: !!merged.viewerLinks },
-              "Tool update edit failed",
-            );
-          }
-        }
+        await this.toolTracker.updateCall(sessionId, {
+          ...meta,
+          viewerFilePath: (content.metadata as any)?.viewerFilePath,
+        });
         break;
       }
 
       case "plan": {
         const meta = content.metadata as never as {
-          entries: Array<{ content: string; status: string; priority: string }>
-        }
-        const tracker = this.getOrCreateTracker(sessionId, threadId)
+          entries: Array<{ content: string; status: string; priority: string }>;
+        };
+        const tracker = this.getOrCreateTracker(sessionId, threadId);
         await tracker.onPlan(
           meta.entries.map(e => ({
             content: e.content,
             status: e.status as 'pending' | 'in_progress' | 'completed',
             priority: (e.priority ?? 'medium') as 'high' | 'medium' | 'low',
           })),
-        )
+        );
         break;
       }
 
@@ -598,41 +504,41 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
         const meta = content.metadata as never as {
           tokensUsed?: number;
           contextSize?: number;
-        }
-        await this.finalizeDraft(sessionId)
-        const tracker = this.getOrCreateTracker(sessionId, threadId)
-        await tracker.sendUsage(meta)
+        };
+        await this.draftManager.finalize(sessionId, this.assistantSession?.id);
+        const tracker = this.getOrCreateTracker(sessionId, threadId);
+        await tracker.sendUsage(meta);
 
         // Notify the Notifications topic that a prompt has completed
         if (this.notificationTopicId && sessionId !== this.assistantSession?.id) {
-          const sess = this.core.sessionManager.getSession(sessionId)
-          const sessionName = sess?.name || 'Session'
-          const chatIdStr = String(this.telegramConfig.chatId)
-          const numericId = chatIdStr.startsWith('-100') ? chatIdStr.slice(4) : chatIdStr.replace('-', '')
-          const usageMsgId = tracker.getUsageMsgId()
-          const deepLink = `https://t.me/c/${numericId}/${usageMsgId ?? threadId}`
-          const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`
+          const sess = this.core.sessionManager.getSession(sessionId);
+          const sessionName = sess?.name || 'Session';
+          const chatIdStr = String(this.telegramConfig.chatId);
+          const numericId = chatIdStr.startsWith('-100') ? chatIdStr.slice(4) : chatIdStr.replace('-', '');
+          const usageMsgId = tracker.getUsageMsgId();
+          const deepLink = `https://t.me/c/${numericId}/${usageMsgId ?? threadId}`;
+          const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`;
           this.sendQueue.enqueue(() =>
             this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
               message_thread_id: this.notificationTopicId,
               parse_mode: 'HTML',
               disable_notification: false,
             }),
-          ).catch(() => {})
+          ).catch(() => {});
         }
         break;
       }
 
       case "session_end": {
-        await this.finalizeDraft(sessionId);
-        this.sessionDrafts.delete(sessionId);
-        this.toolCallMessages.delete(sessionId);
-        await this.cleanupSkillCommands(sessionId);
-        const tracker = this.sessionTrackers.get(sessionId)
+        await this.draftManager.finalize(sessionId, this.assistantSession?.id);
+        this.draftManager.cleanup(sessionId);
+        this.toolTracker.cleanup(sessionId);
+        await this.skillManager.cleanup(sessionId);
+        const tracker = this.sessionTrackers.get(sessionId);
         if (tracker) {
-          await tracker.onComplete()
-          tracker.destroy()
-          this.sessionTrackers.delete(sessionId)
+          await tracker.onComplete();
+          tracker.destroy();
+          this.sessionTrackers.delete(sessionId);
         } else {
           await this.sendQueue.enqueue(() =>
             this.bot.api.sendMessage(
@@ -644,17 +550,17 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
                 disable_notification: true,
               },
             ),
-          )
+          );
         }
         break;
       }
 
       case "error": {
-        await this.finalizeDraft(sessionId);
-        const tracker = this.sessionTrackers.get(sessionId)
+        await this.draftManager.finalize(sessionId, this.assistantSession?.id);
+        const tracker = this.sessionTrackers.get(sessionId);
         if (tracker) {
-          tracker.destroy()
-          this.sessionTrackers.delete(sessionId)
+          tracker.destroy();
+          this.sessionTrackers.delete(sessionId);
         }
         await this.sendQueue.enqueue(() =>
           this.bot.api.sendMessage(
@@ -677,12 +583,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     request: PermissionRequest,
   ): Promise<void> {
     log.info({ sessionId, requestId: request.id }, "Permission request sent");
-    const session = this.core.sessionManager.getSession(
-      sessionId,
-    );
+    const session = this.core.sessionManager.getSession(sessionId);
     if (!session) return;
 
-    // Auto-approve openacp CLI commands for all sessions
+    // Auto-approve openacp CLI commands
     if (request.description.includes("openacp")) {
       const allowOption = request.options.find((o) => o.isAllow);
       if (allowOption && session.permissionGate.requestId === request.id) {
@@ -692,7 +596,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       return;
     }
 
-    // Dangerous mode: auto-approve without prompting the user
+    // Dangerous mode: auto-approve
     if (session.dangerousMode) {
       const allowOption = request.options.find((o) => o.isAllow);
       if (allowOption && session.permissionGate.requestId === request.id) {
@@ -708,7 +612,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
   }
 
   async sendNotification(notification: NotificationMessage): Promise<void> {
-    // Skip notifications for the assistant session (system session, not user-visible)
     if (notification.sessionId === this.assistantSession?.id) return;
 
     log.info(
@@ -725,12 +628,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     let text = `${emoji[notification.type] || "ℹ️"} <b>${escapeHtml(notification.sessionName || "New session")}</b>\n`;
     text += escapeHtml(notification.summary);
 
-    // Build deep link to session topic (Telegram supergroup format: /c/{chatId}/{threadId})
     const deepLink = notification.deepLink ?? (() => {
       const session = this.core.sessionManager.getSession(notification.sessionId);
       const threadId = session?.threadId;
       if (!threadId) return undefined;
-      // chatId for supergroups looks like -1001234567890; strip -100 prefix
       const chatIdStr = String(this.telegramConfig.chatId);
       const numericId = chatIdStr.startsWith("-100") ? chatIdStr.slice(4) : chatIdStr.replace("-", "");
       return `https://t.me/c/${numericId}/${threadId}`;
@@ -756,9 +657,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
   }
 
   async renameSessionThread(sessionId: string, newName: string): Promise<void> {
-    const session = this.core.sessionManager.getSession(
-      sessionId,
-    );
+    const session = this.core.sessionManager.getSession(sessionId);
     if (!session) return;
     await renameSessionTopic(
       this.bot,
@@ -766,14 +665,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       Number(session.threadId),
       newName,
     );
-    await this.core.sessionManager.updateSessionName(
-      sessionId,
-      newName,
-    );
+    await this.core.sessionManager.patchRecord(sessionId, { name: newName });
   }
 
   async deleteSessionThread(sessionId: string): Promise<void> {
-    // Look up topicId from session record platform data
     const record = this.core.sessionManager.getSessionRecord(sessionId);
     const platform = record?.platform as import("../../core/types.js").TelegramPlatformData | undefined;
     const topicId = platform?.topicId;
@@ -790,7 +685,6 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     sessionId: string,
     commands: AgentCommand[],
   ): Promise<void> {
-    // Suppress skill commands for the assistant session entirely
     if (sessionId === this.assistantSession?.id) return;
 
     const session = this.core.sessionManager.getSession(sessionId);
@@ -798,146 +692,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     const threadId = Number(session.threadId);
     if (!threadId) return;
 
-    // Restore skillMsgIds from persisted platform data if not in memory (e.g. after restart)
-    if (!this.skillMessages.has(sessionId)) {
-      const record = this.core.sessionManager.getSessionRecord(sessionId);
-      const platform = record?.platform as import("../../core/types.js").TelegramPlatformData | undefined;
-      if (platform?.skillMsgId) {
-        this.skillMessages.set(sessionId, platform.skillMsgId);
-      }
-    }
-
-    // Empty commands → remove pinned message
-    if (commands.length === 0) {
-      await this.cleanupSkillCommands(sessionId);
-      return;
-    }
-
-    const messages = buildSkillMessages(commands);
-    const existingMsgId = this.skillMessages.get(sessionId);
-
-    if (existingMsgId) {
-      // Update existing pinned message
-      try {
-        await this.bot.api.editMessageText(
-          this.telegramConfig.chatId,
-          existingMsgId,
-          messages[0],
-          { parse_mode: "HTML" },
-        );
-        return;
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("message is not modified")) {
-          // Content unchanged — nothing to do
-          return;
-        }
-        // Message may have been deleted or format changed — clean up and create new
-        try {
-          await this.bot.api.deleteMessage(this.telegramConfig.chatId, existingMsgId);
-        } catch { /* already gone */ }
-        this.skillMessages.delete(sessionId);
-      }
-    }
-
-    // Send new messages and pin the first one
-    try {
-      let firstMsgId: number | undefined;
-      for (const text of messages) {
-        const msg = await this.sendQueue.enqueue(() =>
-          this.bot.api.sendMessage(
-            this.telegramConfig.chatId,
-            text,
-            {
-              message_thread_id: threadId,
-              parse_mode: "HTML",
-              disable_notification: true,
-            },
-          ),
-        );
-        if (!firstMsgId) firstMsgId = msg!.message_id;
-      }
-
-      this.skillMessages.set(sessionId, firstMsgId!);
-
-      // Persist skillMsgId so it survives restarts
-      const record = this.core.sessionManager.getSessionRecord(sessionId);
-      if (record) {
-        await this.core.sessionManager.updateSessionPlatform(
-          sessionId,
-          { ...record.platform, skillMsgId: firstMsgId },
-        );
-      }
-
-      await this.bot.api.pinChatMessage(
-        this.telegramConfig.chatId,
-        firstMsgId!,
-        { disable_notification: true },
-      );
-    } catch (err) {
-      log.error({ err, sessionId }, "Failed to send skill commands");
-    }
+    await this.skillManager.send(sessionId, threadId, commands);
   }
 
   async cleanupSkillCommands(sessionId: string): Promise<void> {
-    const msgId = this.skillMessages.get(sessionId);
-    if (!msgId) return;
-
-    try {
-      await this.bot.api.editMessageText(
-        this.telegramConfig.chatId,
-        msgId,
-        "🛠 <i>Session ended</i>",
-        { parse_mode: "HTML" },
-      );
-      await this.bot.api.unpinChatMessage(this.telegramConfig.chatId, msgId);
-    } catch {
-      /* message may already be deleted */
-    }
-
-    this.skillMessages.delete(sessionId);
-
-    // Clear persisted skillMsgId
-    const record = this.core.sessionManager.getSessionRecord(sessionId);
-    if (record) {
-      const { skillMsgId: _removed, ...rest } = record.platform as unknown as import("../../core/types.js").TelegramPlatformData;
-      await this.core.sessionManager.updateSessionPlatform(sessionId, rest);
-    }
-  }
-
-
-  private async finalizeDraft(sessionId: string): Promise<void> {
-    const draft = this.sessionDrafts.get(sessionId);
-    if (!draft) return;
-
-    // Delete BEFORE awaiting to prevent concurrent finalizeDraft() calls
-    // from double-finalizing the same draft (events are not awaited in
-    // wireSessionEvents, so tool_call/usage/session_end can race).
-    this.sessionDrafts.delete(sessionId);
-    const finalMsgId = await draft.finalize();
-
-    // Detect actions in assistant responses and attach keyboard via editMessageReplyMarkup
-    if (sessionId === this.assistantSession?.id) {
-      const fullText = this.sessionTextBuffers.get(sessionId);
-      this.sessionTextBuffers.delete(sessionId);
-      if (fullText && finalMsgId) {
-        const detected = detectAction(fullText);
-        if (detected) {
-          const actionId = storeAction(detected);
-          const keyboard = buildActionKeyboard(actionId, detected);
-          try {
-            await this.bot.api.editMessageReplyMarkup(
-              this.telegramConfig.chatId,
-              finalMsgId,
-              { reply_markup: keyboard },
-            );
-          } catch {
-            // Best effort — keyboard attachment is non-critical
-          }
-        }
-      }
-    } else {
-      this.sessionTextBuffers.delete(sessionId);
-    }
+    await this.skillManager.cleanup(sessionId);
   }
 }

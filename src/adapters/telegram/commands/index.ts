@@ -8,6 +8,7 @@ import { handleCancel, handleStatus, handleTopics, setupSessionCallbacks } from 
 import { handleEnableDangerous, handleDisableDangerous, handleUpdate, handleRestart } from "./admin.js";
 import { handleMenu, handleHelp, handleAgents, handleClear, buildMenuKeyboard } from "./menu.js";
 import { handleIntegrate } from "./integrate.js";
+import { handleSettings, setupSettingsCallbacks } from "./settings.js";
 
 export function setupCommands(
   bot: Bot,
@@ -36,10 +37,14 @@ export function setupAllCallbacks(
   core: OpenACPCore,
   chatId: number,
   systemTopicIds?: { notificationTopicId: number; assistantTopicId: number },
+  getAssistantSession?: () => { topicId: number; enqueuePrompt: (p: string) => Promise<void> } | undefined,
 ): void {
   // Register specific prefix handlers FIRST (grammY middleware order matters)
   setupNewSessionCallbacks(bot, core, chatId);
   setupSessionCallbacks(bot, core, chatId, systemTopicIds);
+
+  // Settings handlers — must be before broad m: handler
+  setupSettingsCallbacks(bot, core, getAssistantSession ?? (() => undefined))
 
   // Broad m: handler for remaining menu dispatch — LAST
   bot.callbackQuery(/^m:/, async (ctx) => {
@@ -73,6 +78,9 @@ export function setupAllCallbacks(
       case "m:topics":
         await handleTopics(ctx, core);
         break;
+      case "m:settings":
+        await handleSettings(ctx, core);
+        break;
     }
   });
 }
@@ -87,6 +95,7 @@ export { handlePendingWorkspaceInput, executeNewSession, startInteractiveNewSess
 export { executeCancelSession } from "./session.js";
 export { setupDangerousModeCallbacks, buildDangerousModeKeyboard } from "./admin.js";
 export { setupIntegrateCallbacks } from "./integrate.js";
+export { setupSettingsCallbacks } from "./settings.js";
 
 export const STATIC_COMMANDS = [
   { command: "new", description: "Create new session" },

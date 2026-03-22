@@ -145,6 +145,8 @@ export class ApiServer {
         await this.handleHealth(res)
       } else if (method === 'GET' && url === '/api/version') {
         await this.handleVersion(res)
+      } else if (method === 'GET' && url === '/api/config/editable') {
+        await this.handleGetEditableConfig(res)
       } else if (method === 'GET' && url === '/api/config') {
         await this.handleGetConfig(res)
       } else if (method === 'PATCH' && url === '/api/config') {
@@ -204,18 +206,18 @@ export class ApiServer {
     const [adapterId, adapter] = this.core.adapters.entries().next().value ?? [null, null]
     const channelId = adapterId ?? 'api'
 
-    const session = await this.core.handleNewSession(channelId, agent, workspace)
+    const resolvedAgent = agent || config.defaultAgent
+    const resolvedWorkspace = this.core.configManager.resolveWorkspace(
+      workspace || config.agents[resolvedAgent]?.workingDirectory,
+    )
 
-    // If an adapter is available, create a session thread (Telegram topic) and wire events
-    if (adapter) {
-      try {
-        const threadId = await adapter.createSessionThread(session.id, `🔄 ${session.agentName} — New Session`)
-        session.threadId = threadId
-        this.core.wireSessionEvents(session, adapter)
-      } catch (err) {
-        log.warn({ err, sessionId: session.id }, 'Failed to create session thread on adapter, running headless')
-      }
-    }
+    const session = await this.core.createSession({
+      channelId,
+      agentName: resolvedAgent,
+      workingDirectory: resolvedWorkspace,
+      createThread: !!adapter,
+      initialName: `🔄 ${resolvedAgent} — New Session`,
+    })
 
     // If no adapter wired events (headless), auto-approve permissions
     if (!adapter) {
@@ -320,7 +322,7 @@ export class ApiServer {
     }
 
     session.dangerousMode = enabled
-    await this.core.sessionManager.updateSessionDangerousMode(sessionId, enabled)
+    await this.core.sessionManager.patchRecord(sessionId, { dangerousMode: enabled })
     this.sendJson(res, 200, { ok: true, dangerousMode: enabled })
   }
 
@@ -350,6 +352,24 @@ export class ApiServer {
 
   private async handleVersion(res: http.ServerResponse): Promise<void> {
     this.sendJson(res, 200, { version: getVersion() })
+  }
+
+  private async handleGetEditableConfig(res: http.ServerResponse): Promise<void> {
+    const { getSafeFields, resolveOptions, getConfigValue } = await import('./config-registry.js')
+    const config = this.core.configManager.get()
+    const safeFields = getSafeFields()
+
+    const fields = safeFields.map((def) => ({
+      path: def.path,
+      displayName: def.displayName,
+      group: def.group,
+      type: def.type,
+      options: resolveOptions(def, config),
+      value: getConfigValue(config, def.path),
+      hotReload: def.hotReload,
+    }))
+
+    this.sendJson(res, 200, { fields })
   }
 
   private async handleGetConfig(res: http.ServerResponse): Promise<void> {
@@ -420,13 +440,10 @@ export class ApiServer {
     }
     updateTarget[lastKey] = value
 
-    await this.core.configManager.save(updates)
+    await this.core.configManager.save(updates, configPath)
 
-    const RESTART_PREFIXES = ['api.port', 'api.host', 'runMode', 'channels.', 'tunnel.', 'agents.']
-    const needsRestart = RESTART_PREFIXES.some(prefix =>
-      configPath!.startsWith(prefix) ||
-      configPath === prefix.replace(/\.$/, '') // exact match for non-wildcard
-    )
+    const { isHotReloadable } = await import('./config-registry.js')
+    const needsRestart = !isHotReloadable(configPath!)
 
     this.sendJson(res, 200, {
       ok: true,
@@ -494,7 +511,7 @@ export class ApiServer {
       this.sendJson(res, 404, { error: `Session "${sessionId}" not found` })
       return
     }
-    await session.cancel()
+    await session.abortPrompt()
     this.sendJson(res, 200, { ok: true })
   }
 
