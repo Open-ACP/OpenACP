@@ -557,7 +557,11 @@ async function editProviderOptions(
 
 // --- Main Config Editor ---
 
-export async function runConfigEditor(configManager: ConfigManager): Promise<void> {
+export async function runConfigEditor(
+  configManager: ConfigManager,
+  mode: 'file' | 'api' = 'file',
+  apiPort?: number,
+): Promise<void> {
   await configManager.load()
   const config = configManager.get()
   const updates: ConfigUpdates = {}
@@ -568,7 +572,7 @@ export async function runConfigEditor(configManager: ConfigManager): Promise<voi
 
   try {
     while (true) {
-      const hasChanges = Object.keys(updates).length > 0
+      const hasChanges = mode === 'file' ? Object.keys(updates).length > 0 : false
       const choice = await select({
         message: `What would you like to edit?${hasChanges ? ` ${c.yellow}(unsaved changes)${c.reset}` : ''}`,
         choices: [
@@ -585,23 +589,35 @@ export async function runConfigEditor(configManager: ConfigManager): Promise<voi
       })
 
       if (choice === 'exit') {
-        if (hasChanges) {
+        if (mode === 'file' && hasChanges) {
           await configManager.save(updates)
           console.log(ok(`Config saved to ${configManager.getConfigPath()}`))
-        } else {
+        } else if (mode === 'file') {
           console.log(dim('No changes made.'))
         }
         break
       }
 
-      if (choice === 'telegram') await editTelegram(config, updates)
-      else if (choice === 'agent') await editAgent(config, updates)
-      else if (choice === 'workspace') await editWorkspace(config, updates)
-      else if (choice === 'security') await editSecurity(config, updates)
-      else if (choice === 'logging') await editLogging(config, updates)
-      else if (choice === 'runMode') await editRunMode(config, updates)
-      else if (choice === 'api') await editApi(config, updates)
-      else if (choice === 'tunnel') await editTunnel(config, updates)
+      const sectionUpdates: ConfigUpdates = {}
+
+      if (choice === 'telegram') await editTelegram(config, sectionUpdates)
+      else if (choice === 'agent') await editAgent(config, sectionUpdates)
+      else if (choice === 'workspace') await editWorkspace(config, sectionUpdates)
+      else if (choice === 'security') await editSecurity(config, sectionUpdates)
+      else if (choice === 'logging') await editLogging(config, sectionUpdates)
+      else if (choice === 'runMode') await editRunMode(config, sectionUpdates)
+      else if (choice === 'api') await editApi(config, sectionUpdates)
+      else if (choice === 'tunnel') await editTunnel(config, sectionUpdates)
+
+      if (mode === 'api' && Object.keys(sectionUpdates).length > 0) {
+        await sendConfigViaApi(apiPort!, sectionUpdates)
+        // Refresh in-memory config
+        await configManager.load()
+        Object.assign(config, configManager.get())
+      } else {
+        // Accumulate for file mode
+        Object.assign(updates, sectionUpdates)
+      }
     }
   } catch (err) {
     if ((err as Error).name === 'ExitPromptError') {
@@ -610,4 +626,36 @@ export async function runConfigEditor(configManager: ConfigManager): Promise<voi
     }
     throw err
   }
+}
+
+async function sendConfigViaApi(port: number, updates: ConfigUpdates): Promise<void> {
+  const { apiCall: call } = await import('./api-client.js')
+
+  const paths = flattenToPaths(updates)
+  for (const { path, value } of paths) {
+    const res = await call(port, '/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, value }),
+    })
+    const data = await res.json() as Record<string, unknown>
+    if (!res.ok) {
+      console.log(warn(`Failed to update ${path}: ${data.error}`))
+    } else if (data.needsRestart) {
+      console.log(warn(`${path} updated — restart required`))
+    }
+  }
+}
+
+function flattenToPaths(obj: Record<string, unknown>, prefix = ''): Array<{ path: string; value: unknown }> {
+  const result: Array<{ path: string; value: unknown }> = []
+  for (const [key, val] of Object.entries(obj)) {
+    const fullPath = prefix ? `${prefix}.${key}` : key
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      result.push(...flattenToPaths(val as Record<string, unknown>, fullPath))
+    } else {
+      result.push({ path: fullPath, value: val })
+    }
+  }
+  return result
 }

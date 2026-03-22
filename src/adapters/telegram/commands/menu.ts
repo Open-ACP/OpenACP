@@ -13,10 +13,12 @@ export function buildMenuKeyboard(): InlineKeyboard {
     .text("📊 Status", "m:status")
     .text("🤖 Agents", "m:agents")
     .row()
+    .text("⚙️ Settings", "m:settings")
     .text("🔗 Integrate", "m:integrate")
-    .text("❓ Help", "m:help")
     .row()
+    .text("❓ Help", "m:help")
     .text("🔄 Restart", "m:restart")
+    .row()
     .text("⬆️ Update", "m:update");
 }
 

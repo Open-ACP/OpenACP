@@ -16,22 +16,16 @@ export async function spawnAssistant(
 ): Promise<SpawnAssistantResult> {
   const config = core.configManager.get();
 
-  // Create session with default agent
+  // Create session with default agent via unified pipeline
   log.info({ agent: config.defaultAgent }, "Creating assistant session...");
-  const session = await core.sessionManager.createSession(
-    "telegram",
-    config.defaultAgent,
-    core.configManager.resolveWorkspace(),
-    core.agentManager,
-  );
+  const session = await core.createSession({
+    channelId: "telegram",
+    agentName: config.defaultAgent,
+    workingDirectory: core.configManager.resolveWorkspace(),
+    initialName: "Assistant", // Prevent auto-naming from triggering after system prompt
+  });
   session.threadId = String(assistantTopicId);
-  session.name = "Assistant"; // Prevent auto-naming from triggering after system prompt
   log.info({ sessionId: session.id }, "Assistant agent spawned");
-
-  // Wire events first so the adapter is ready to receive real user responses.
-  // The system prompt response will be suppressed by the adapter via the
-  // assistantInitializing flag — it checks the flag before routing messages.
-  core.wireSessionEvents(session, adapter);
 
   // Build dynamic context for system prompt
   const allRecords = core.sessionManager.listRecords();
@@ -148,8 +142,10 @@ export function buildAssistantSystemPrompt(ctx: AssistantContext): string {
 - Execute: \`openacp api cleanup --status <statuses>\`
 
 ### Configuration
-- View: \`openacp api config\`
-- Update: \`openacp api config set <key> <value>\`
+- View: \`openacp config\` (or \`openacp api config\` — deprecated)
+- Update: \`openacp config set <key> <value>\`
+- When user asks about "settings" or "config", use \`openacp config set\` directly
+- When receiving a delegated request from the Settings menu, ask user for the new value, then apply with \`openacp config set <path> <value>\`
 
 ### Restart / Update
 - Always ask for confirmation — these are disruptive actions
@@ -179,8 +175,10 @@ openacp api cleanup --status finished,error
 
 # System
 openacp api health                       # System health
-openacp api config                       # Show config
-openacp api config set <key> <value>     # Update config
+openacp config                           # Edit config (interactive)
+openacp config set <key> <value>         # Update config value
+openacp api config                       # Show config (deprecated)
+openacp api config set <key> <value>     # Update config (deprecated)
 openacp api adapters                     # List adapters
 openacp api tunnel                       # Tunnel status
 openacp api notify "message"             # Send notification

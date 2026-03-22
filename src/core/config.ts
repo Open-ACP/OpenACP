@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { EventEmitter } from "node:events";
 import { applyMigrations } from "./config-migrations.js";
 import { createChildLogger } from "./log.js";
 const log = createChildLogger({ module: "config" });
@@ -132,11 +133,12 @@ const DEFAULT_CONFIG = {
   },
 };
 
-export class ConfigManager {
+export class ConfigManager extends EventEmitter {
   private config!: Config;
   private configPath: string;
 
   constructor() {
+    super();
     this.configPath =
       process.env.OPENACP_CONFIG_PATH || expandHome("~/.openacp/config.json");
   }
@@ -190,7 +192,8 @@ export class ConfigManager {
     return this.config;
   }
 
-  async save(updates: Record<string, unknown>): Promise<void> {
+  async save(updates: Record<string, unknown>, changePath?: string): Promise<void> {
+    const oldConfig = this.config ? structuredClone(this.config) : undefined;
     // Read current file, merge updates, write back
     const raw = JSON.parse(fs.readFileSync(this.configPath, "utf-8"));
     this.deepMerge(raw, updates);
@@ -199,6 +202,13 @@ export class ConfigManager {
     const result = ConfigSchema.safeParse(raw);
     if (result.success) {
       this.config = result.data;
+    }
+    // Emit change event if path provided
+    if (changePath) {
+      const { getConfigValue } = await import('./config-registry.js')
+      const value = getConfigValue(this.config, changePath)
+      const oldValue = oldConfig ? getConfigValue(oldConfig, changePath) : undefined
+      this.emit('config:changed', { path: changePath, value, oldValue })
     }
   }
 

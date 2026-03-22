@@ -13,6 +13,7 @@ Usage:
   openacp status                       Show daemon status
   openacp logs                         Tail daemon log file
   openacp config                       Edit configuration
+  openacp config set <key> <value>     Set a config value
   openacp reset                        Delete all data and start fresh
   openacp update                       Update to latest version
   openacp install <package>            Install a plugin adapter
@@ -38,8 +39,8 @@ API (requires running daemon):
   openacp api health                       Show system health
   openacp api adapters                     List registered adapters
   openacp api tunnel                       Show tunnel status
-  openacp api config                       Show runtime config
-  openacp api config set <key> <value>     Update config value
+  openacp api config                       Show runtime config (deprecated)
+  openacp api config set <key> <value>     Update config value (deprecated)
   openacp api restart                      Restart daemon
   openacp api notify <message>             Send notification to all channels
   openacp api version                      Show daemon version
@@ -328,6 +329,7 @@ export async function cmdApi(args: string[]): Promise<void> {
       console.log('Restart signal sent. OpenACP is restarting...')
 
     } else if (subCmd === 'config') {
+      console.warn('⚠️  Deprecated: use "openacp config" or "openacp config set" instead.')
       const subSubCmd = args[2]
       if (!subSubCmd) {
         const res = await apiCall(port, '/api/config')
@@ -516,7 +518,55 @@ export async function cmdLogs(): Promise<void> {
   })
 }
 
-export async function cmdConfig(): Promise<void> {
+export async function cmdConfig(args: string[] = []): Promise<void> {
+  const subCmd = args[1] // 'set' or undefined
+
+  if (subCmd === 'set') {
+    // Non-interactive: openacp config set <key> <value>
+    const configPath = args[2]
+    const configValue = args[3]
+    if (!configPath || configValue === undefined) {
+      console.error('Usage: openacp config set <path> <value>')
+      process.exit(1)
+    }
+
+    let value: unknown = configValue
+    try { value = JSON.parse(configValue) } catch { /* keep as string */ }
+
+    const port = readApiPort()
+    if (port !== null) {
+      // Server running — use API
+      const res = await apiCall(port, '/api/config', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: configPath, value }),
+      })
+      const data = await res.json() as Record<string, unknown>
+      if (!res.ok) {
+        console.error(`Error: ${data.error}`)
+        process.exit(1)
+      }
+      console.log(`Config updated: ${configPath} = ${JSON.stringify(value)}`)
+      if (data.needsRestart) {
+        console.log('Note: restart required for this change to take effect.')
+      }
+    } else {
+      // Server not running — update file directly
+      const { ConfigManager } = await import('../core/config.js')
+      const cm = new ConfigManager()
+      if (!(await cm.exists())) {
+        console.error('No config found. Run "openacp" first to set up.')
+        process.exit(1)
+      }
+      await cm.load()
+      const updates = buildNestedUpdateFromPath(configPath, value)
+      await cm.save(updates)
+      console.log(`Config updated: ${configPath} = ${JSON.stringify(value)}`)
+    }
+    return
+  }
+
+  // Interactive editor
   const { runConfigEditor } = await import('../core/config-editor.js')
   const { ConfigManager } = await import('../core/config.js')
   const cm = new ConfigManager()
@@ -524,7 +574,25 @@ export async function cmdConfig(): Promise<void> {
     console.error('No config found. Run "openacp" first to set up.')
     process.exit(1)
   }
-  await runConfigEditor(cm)
+
+  const port = readApiPort()
+  if (port !== null) {
+    await runConfigEditor(cm, 'api', port)
+  } else {
+    await runConfigEditor(cm, 'file')
+  }
+}
+
+function buildNestedUpdateFromPath(dotPath: string, value: unknown): Record<string, unknown> {
+  const parts = dotPath.split('.')
+  const result: Record<string, unknown> = {}
+  let target = result
+  for (let i = 0; i < parts.length - 1; i++) {
+    target[parts[i]] = {}
+    target = target[parts[i]] as Record<string, unknown>
+  }
+  target[parts[parts.length - 1]] = value
+  return result
 }
 
 export async function cmdReset(): Promise<void> {

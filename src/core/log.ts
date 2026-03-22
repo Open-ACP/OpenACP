@@ -113,6 +113,11 @@ export function initLogger(config: LoggingConfig): Logger {
   return rootLogger
 }
 
+/** Change log level at runtime. Pino transport targets respect parent level changes automatically. */
+export function setLogLevel(level: string): void {
+  rootLogger.level = level
+}
+
 export function createChildLogger(context: { module: string; [key: string]: unknown }): Logger {
   // Return a proxy that always delegates to the current rootLogger.
   // This ensures child loggers created at module-level (before initLogger)
