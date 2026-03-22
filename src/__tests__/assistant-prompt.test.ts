@@ -19,10 +19,11 @@ function makeCtx(overrides?: Partial<AssistantContext>): AssistantContext {
 }
 
 describe("buildAssistantSystemPrompt", () => {
-  it("includes product context", () => {
+  it("includes identity and product guide", () => {
     const prompt = buildAssistantSystemPrompt(makeCtx());
     expect(prompt).toContain("OpenACP Assistant");
-    expect(prompt).toContain("Agent Client Protocol");
+    expect(prompt).toContain("Product Reference");
+    expect(prompt).toContain("AI coding agents");
   });
 
   it("includes current state", () => {
@@ -32,18 +33,18 @@ describe("buildAssistantSystemPrompt", () => {
     expect(prompt).toContain("codex");
   });
 
-  it("includes action playbook", () => {
+  it("includes product guide with CLI commands and features", () => {
     const prompt = buildAssistantSystemPrompt(makeCtx());
-    expect(prompt).toContain("openacp api status");
-    expect(prompt).toContain("openacp api cancel");
-    expect(prompt).toContain("openacp api health");
-    expect(prompt).toContain("openacp api cleanup");
-    expect(prompt).toContain("openacp api config");
+    expect(prompt).toContain("openacp api");
+    expect(prompt).toContain("cancel");
+    expect(prompt).toContain("cleanup");
+    expect(prompt).toContain("Handoff");
+    expect(prompt).toContain("Dangerous");
   });
 
   it("includes guidelines about self-execution", () => {
     const prompt = buildAssistantSystemPrompt(makeCtx());
-    expect(prompt).toContain("openacp api");
+    expect(prompt).toContain("NEVER show");
     expect(prompt).toContain("confirm");
     expect(prompt).toContain("same language");
   });
@@ -54,9 +55,9 @@ describe("buildAssistantSystemPrompt", () => {
     expect(prompt).not.toContain("These are Telegram bot commands");
   });
 
-  it("includes workspace explanation in create session playbook", () => {
+  it("includes workspace and project folder explanation", () => {
     const prompt = buildAssistantSystemPrompt(makeCtx());
     expect(prompt).toContain("workspace");
-    expect(prompt).toContain("project directory");
+    expect(prompt).toContain("project folder");
   });
 });

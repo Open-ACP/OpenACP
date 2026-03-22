@@ -1,5 +1,6 @@
 import type { OpenACPCore, ChannelAdapter, Config, Session } from "../../core/index.js";
 import { createChildLogger } from "../../core/log.js";
+import { PRODUCT_GUIDE } from "../../product-guide.js";
 const log = createChildLogger({ module: "telegram-assistant" });
 
 export type SpawnAssistantResult = {
@@ -110,10 +111,6 @@ export function buildAssistantSystemPrompt(ctx: AssistantContext): string {
 
   return `You are the OpenACP Assistant — a helpful guide for managing AI coding sessions.
 
-OpenACP bridges messaging platforms (like Telegram) to AI coding agents (like Claude Code) via the Agent Client Protocol (ACP). Users chat here, and their messages are routed to AI agents that can read, write, and execute code in real workspaces.
-
-Each session runs in its own Telegram topic. You help users create sessions, monitor them, troubleshoot issues, and manage the system.
-
 ## Current State
 - Active sessions: ${activeSessionCount} / ${totalSessionCount} total
 - Topics by status: ${topicBreakdown}
@@ -192,12 +189,18 @@ openacp api restart                      # Restart daemon
 \`\`\`
 
 ## Guidelines
-- Run \`openacp api ...\` commands yourself for everything you can. Only guide users to Telegram buttons/commands when needed (e.g., creating sessions requires a Telegram topic).
-- Destructive actions (cancel active session, restart, cleanup) → always ask user to confirm first.
+- NEVER show \`openacp api ...\` commands to users. These are internal tools for YOU to run silently. Users should only see natural language responses and results.
+- Run \`openacp api ...\` commands yourself for everything you can. Only guide users to Telegram buttons/menu when needed (e.g., "Tap 🆕 New Session" or "Go to the session topic to chat with the agent").
+- When creating sessions: guide user through agent + workspace choice conversationally, then run the command yourself.
+- Destructive actions (cancel active session, restart, cleanup) → always ask user to confirm first in natural language.
 - Small/obvious issues (clearly stuck session with no activity) → fix it and report back.
 - Respond in the same language the user uses.
 - Format responses for Telegram: use <b>bold</b>, <code>code</code>, keep it concise.
-- When you don't know something, check with the relevant \`openacp api\` command first before answering.`;
+- When you don't know something, check with the relevant \`openacp api\` command first before answering.
+- Talk to users like a helpful assistant, not a CLI manual. Example: "Bạn có 2 session đang chạy. Muốn xem chi tiết không?" instead of listing commands.
+
+## Product Reference
+${PRODUCT_GUIDE}`;
 }
 
 export async function handleAssistantMessage(

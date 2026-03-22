@@ -237,6 +237,20 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       {
         topicId: this.assistantTopicId,
         getSession: () => this.assistantSession,
+        respawn: async () => {
+          if (this.assistantSession) {
+            await this.assistantSession.destroy();
+            this.assistantSession = null;
+          }
+          const { session, ready } = await spawnAssistant(
+            this.core as OpenACPCore,
+            this,
+            this.assistantTopicId,
+          );
+          this.assistantSession = session;
+          this.assistantInitializing = true;
+          ready.then(() => { this.assistantInitializing = false; });
+        },
       },
     );
     this.permissionHandler.setupCallbackHandler();
@@ -364,7 +378,7 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
       const threadId = ctx.message.message_thread_id;
 
       // Check for pending workspace input from interactive /new flow
-      if (await handlePendingWorkspaceInput(ctx, this.telegramConfig.chatId)) {
+      if (await handlePendingWorkspaceInput(ctx, this.core, this.telegramConfig.chatId, this.assistantTopicId)) {
         return;
       }
 
@@ -430,6 +444,10 @@ export class TelegramAdapter extends ChannelAdapter<OpenACPCore> {
     );
     if (!session) return;
     const threadId = Number(session.threadId);
+    if (!threadId || isNaN(threadId)) {
+      log.warn({ sessionId, threadId: session.threadId }, "Session has no valid threadId, skipping message");
+      return;
+    }
 
     switch (content.type) {
       case "thought": {

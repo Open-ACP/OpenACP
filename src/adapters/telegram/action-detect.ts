@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { InlineKeyboard } from "grammy";
 import type { Bot } from "grammy";
 import type { OpenACPCore } from "../../core/core.js";
-import { executeNewSession, executeCancelSession } from "./commands.js";
+import { executeNewSession, executeCancelSession, startInteractiveNewSession } from "./commands.js";
 
 export interface DetectedAction {
   action: "new_session" | "cancel_session";
@@ -123,26 +123,38 @@ export function setupActionCallbacks(
 
     try {
       if (action.action === "new_session") {
-        await ctx.answerCallbackQuery({ text: "⏳ Creating session..." });
-        const { threadId, firstMsgId } = await executeNewSession(
-          bot,
-          core,
-          chatId,
-          action.agent,
-          action.workspace,
-        );
-        const topicLink = `https://t.me/c/${String(chatId).replace("-100", "")}/${firstMsgId ?? threadId}`;
-        const originalText = ctx.callbackQuery.message?.text ?? "";
-        try {
-          await ctx.editMessageText(
-            originalText +
-              `\n\n✅ Session created → <a href="${topicLink}">Go to topic</a>`,
-            { parse_mode: "HTML" },
+        // If both agent and workspace provided → create directly
+        if (action.agent && action.workspace) {
+          await ctx.answerCallbackQuery({ text: "⏳ Creating session..." });
+          const { threadId, firstMsgId } = await executeNewSession(
+            bot,
+            core,
+            chatId,
+            action.agent,
+            action.workspace,
           );
-        } catch {
-          await ctx.editMessageReplyMarkup({
-            reply_markup: { inline_keyboard: [] },
-          });
+          const topicLink = `https://t.me/c/${String(chatId).replace("-100", "")}/${firstMsgId ?? threadId}`;
+          const originalText = ctx.callbackQuery.message?.text ?? "";
+          try {
+            await ctx.editMessageText(
+              originalText +
+                `\n\n✅ Session created → <a href="${topicLink}">Go to topic</a>`,
+              { parse_mode: "HTML" },
+            );
+          } catch {
+            await ctx.editMessageReplyMarkup({
+              reply_markup: { inline_keyboard: [] },
+            });
+          }
+        } else {
+          // Missing workspace → start interactive flow
+          await ctx.answerCallbackQuery();
+          try {
+            await ctx.editMessageReplyMarkup({
+              reply_markup: { inline_keyboard: [] },
+            });
+          } catch { /* best effort */ }
+          await startInteractiveNewSession(ctx, core, chatId, action.agent);
         }
       } else if (action.action === "cancel_session") {
         const assistantId = getAssistantSessionId();

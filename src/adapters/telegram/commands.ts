@@ -11,6 +11,7 @@ const log = createChildLogger({ module: "telegram-commands" });
 interface AssistantContext {
   topicId: number;
   getSession: () => Session | null;
+  respawn: () => Promise<void>;
 }
 
 interface PendingNewSession {
@@ -53,6 +54,7 @@ export function setupCommands(
   bot.command("restart", (ctx) => handleRestart(ctx, core));
   bot.command("update", (ctx) => handleUpdate(ctx, core));
   bot.command("integrate", (ctx) => handleIntegrate(ctx, core));
+  bot.command("clear", (ctx) => handleClear(ctx, assistant));
 }
 
 export function buildMenuKeyboard(): InlineKeyboard {
@@ -109,13 +111,14 @@ export function setupMenuCallbacks(
         await ctx.api.editMessageText(
           chatId,
           pending.messageId,
-          `✏️ <b>Enter the full path to your project directory:</b>\n\n` +
-            `Example: <code>~/code/my-project</code> or <code>/home/user/projects/app</code>`,
+          `✏️ <b>Enter your project path:</b>\n\n` +
+            `Full path like <code>~/code/my-project</code>\n` +
+            `Or just the folder name like <code>my-project</code> (will use ${core.configManager.get().workspace.baseDir}/)`,
           { parse_mode: "HTML" },
         );
       } catch {
         await ctx.reply(
-          `✏️ <b>Enter the full path to your project directory:</b>`,
+          `✏️ <b>Enter your project path:</b>`,
           { parse_mode: "HTML" },
         );
       }
@@ -130,10 +133,19 @@ export function setupMenuCallbacks(
       const pending = pendingNewSessions.get(userId);
       if (!pending?.agentName || !pending?.workspace) return;
       cleanupPending(userId);
+      const confirmMsgId = pending.messageId;
       try {
-        await ctx.api.editMessageText(chatId, pending.messageId, `⏳ Creating session...`, { parse_mode: "HTML" });
+        await ctx.api.editMessageText(chatId, confirmMsgId, `⏳ Creating session...`, { parse_mode: "HTML" });
       } catch { /* ignore */ }
-      await createSessionDirect(ctx, core, chatId, pending.agentName, pending.workspace);
+      const resultThreadId = await createSessionDirect(ctx, core, chatId, pending.agentName, pending.workspace);
+      try {
+        if (resultThreadId) {
+          const link = buildDeepLink(chatId, resultThreadId);
+          await ctx.api.editMessageText(chatId, confirmMsgId, `✅ Session created → <a href="${link}">Open topic</a>`, { parse_mode: "HTML" });
+        } else {
+          await ctx.api.editMessageText(chatId, confirmMsgId, `❌ Session creation failed.`, { parse_mode: "HTML" });
+        }
+      } catch { /* ignore */ }
       return;
     }
     if (data === "m:new:cancel") {
@@ -275,13 +287,14 @@ async function startWorkspaceStep(
   const baseDir = config.workspace.baseDir;
 
   const keyboard = new InlineKeyboard()
-    .text(`📁 Default (${baseDir})`, "m:new:ws:default")
+    .text(`📁 Use ${baseDir}`, "m:new:ws:default")
     .row()
-    .text("✏️ Custom path", "m:new:ws:custom");
+    .text("✏️ Enter project path", "m:new:ws:custom");
 
   const text =
-    `📁 <b>Choose workspace for ${escapeHtml(agentName)}:</b>\n\n` +
-    `The workspace is the project directory where the agent will read, write, and execute code.`;
+    `📁 <b>Where should ${escapeHtml(agentName)} work?</b>\n\n` +
+    `Enter the path to your project folder — the agent will read, write, and run code there.\n\n` +
+    `Or use the default directory below:`;
 
   let msg;
   try {
@@ -323,7 +336,7 @@ async function startConfirmStep(
   const text =
     `✅ <b>Ready to create session?</b>\n\n` +
     `<b>Agent:</b> ${escapeHtml(agentName)}\n` +
-    `<b>Workspace:</b> <code>${escapeHtml(workspace)}</code>`;
+    `<b>Project:</b> <code>${escapeHtml(workspace)}</code>`;
 
   let msg;
   try {
@@ -358,7 +371,7 @@ async function createSessionDirect(
   chatId: number,
   agentName: string,
   workspace: string,
-): Promise<void> {
+): Promise<number | null> {
   log.info({ userId: ctx.from?.id, agentName, workspace }, "New session command (direct)");
 
   let threadId: number | undefined;
@@ -395,6 +408,7 @@ async function createSessionDirect(
     );
 
     session.warmup().catch((err) => log.error({ err }, "Warm-up error"));
+    return threadId ?? null;
   } catch (err) {
     log.error({ err }, "Session creation failed");
     if (threadId) {
@@ -402,6 +416,7 @@ async function createSessionDirect(
     }
     const message = err instanceof Error ? err.message : (typeof err === 'object' ? JSON.stringify(err) : String(err));
     await ctx.reply(`❌ ${escapeHtml(message)}`, { parse_mode: "HTML" });
+    return null;
   }
 }
 
@@ -845,10 +860,34 @@ async function handleHelp(ctx: Context): Promise<void> {
       `🔒 <b>Session Options</b>\n` +
       `/enable_dangerous — Auto-approve permissions\n` +
       `/disable_dangerous — Restore permission prompts\n` +
-      `/handoff — Continue session in terminal\n\n` +
+      `/handoff — Continue session in terminal\n` +
+      `/clear — Clear assistant history\n\n` +
       `💬 Need help? Just ask me in this topic!`,
     { parse_mode: "HTML" },
   );
+}
+
+async function handleClear(ctx: Context, assistant?: AssistantContext): Promise<void> {
+  if (!assistant) {
+    await ctx.reply("⚠️ Assistant is not available.", { parse_mode: "HTML" });
+    return;
+  }
+
+  const threadId = ctx.message?.message_thread_id;
+  if (threadId !== assistant.topicId) {
+    await ctx.reply("ℹ️ /clear only works in the Assistant topic.", { parse_mode: "HTML" });
+    return;
+  }
+
+  await ctx.reply("🔄 Clearing assistant history...", { parse_mode: "HTML" });
+
+  try {
+    await assistant.respawn();
+    await ctx.reply("✅ Assistant history cleared.", { parse_mode: "HTML" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await ctx.reply(`❌ Failed to clear: <code>${message}</code>`, { parse_mode: "HTML" });
+  }
 }
 
 export function buildDangerousModeKeyboard(sessionId: string, enabled: boolean): InlineKeyboard {
@@ -1260,21 +1299,82 @@ export function setupIntegrateCallbacks(
  */
 export async function handlePendingWorkspaceInput(
   ctx: Context,
+  core: OpenACPCore,
   chatId: number,
+  assistantTopicId?: number,
 ): Promise<boolean> {
   const userId = ctx.from?.id;
   if (!userId) return false;
   const pending = pendingNewSessions.get(userId);
-  if (pending?.step !== "workspace_input" || !ctx.message?.text) return false;
+  if (!pending || !ctx.message?.text) return false;
+  // Accept text input at both "workspace" step (user types directly instead of pressing buttons)
+  // and "workspace_input" step (user pressed "Custom path" button)
+  if (pending.step !== "workspace_input" && pending.step !== "workspace") return false;
 
-  const workspace = ctx.message.text.trim();
+  // Only intercept in assistant topic (or no-thread/general) — never in session topics
+  const threadId = ctx.message.message_thread_id;
+  if (threadId && threadId !== assistantTopicId) return false;
+
+  let workspace = ctx.message.text.trim();
   if (!workspace || !pending.agentName) {
     await ctx.reply("⚠️ Please enter a valid directory path.", { parse_mode: "HTML" });
     return true;
   }
 
+  // Relative path (no / or ~ prefix) → resolve against baseDir
+  if (!workspace.startsWith("/") && !workspace.startsWith("~")) {
+    const baseDir = core.configManager.get().workspace.baseDir;
+    workspace = `${baseDir.replace(/\/$/, "")}/${workspace}`;
+  }
+
   await startConfirmStep(ctx, chatId, userId, pending.agentName, workspace);
   return true;
+}
+
+/**
+ * Start the interactive new session flow (agent → workspace → confirm).
+ * Used by action-detect when workspace is not provided.
+ */
+export async function startInteractiveNewSession(
+  ctx: Context,
+  core: OpenACPCore,
+  chatId: number,
+  agentName?: string,
+): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const agents = core.agentManager.getAvailableAgents();
+  const config = core.configManager.get();
+
+  // If agent provided or only 1 agent → skip to workspace step
+  if (agentName || agents.length === 1) {
+    const selectedAgent = agentName || config.defaultAgent;
+    await startWorkspaceStep(ctx, core, chatId, userId, selectedAgent);
+    return;
+  }
+
+  // Multiple agents → show agent selection
+  const keyboard = new InlineKeyboard();
+  for (const agent of agents) {
+    const label = agent.name === config.defaultAgent
+      ? `${agent.name} (default)`
+      : agent.name;
+    keyboard.text(label, `m:new:agent:${agent.name}`).row();
+  }
+
+  const msg = await ctx.reply(
+    `🤖 <b>Choose an agent:</b>`,
+    { parse_mode: "HTML", reply_markup: keyboard },
+  );
+
+  cleanupPending(userId);
+  pendingNewSessions.set(userId, {
+    step: "agent",
+    messageId: msg.message_id,
+    threadId: (ctx.callbackQuery as any)?.message?.message_thread_id,
+    timer: setTimeout(() => pendingNewSessions.delete(userId), PENDING_TIMEOUT_MS),
+  });
 }
 
 export const STATIC_COMMANDS = [
@@ -1290,6 +1390,7 @@ export const STATIC_COMMANDS = [
   { command: "disable_dangerous", description: "Restore normal permission prompts (session only)" },
   { command: "integrate", description: "Manage agent integrations" },
   { command: "handoff", description: "Continue this session in your terminal" },
+  { command: "clear", description: "Clear assistant history" },
   { command: "restart", description: "Restart OpenACP" },
   { command: "update", description: "Update to latest version and restart" },
 ];
