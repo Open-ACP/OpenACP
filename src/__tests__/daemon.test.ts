@@ -122,13 +122,37 @@ describe('daemon', () => {
       vi.restoreAllMocks()
     }, 10000)
 
-    it('handles EPERM during polling (PID reuse)', async () => {
+    it('handles EPERM on initial check (stale PID from another user)', async () => {
       const { writePidFile, stopDaemon, readPidFile } = await import('../core/daemon.js')
       writePidFile(pidFile, process.pid)
 
       vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+        if (signal === 0) {
+          const err = new Error('Operation not permitted') as NodeJS.ErrnoException
+          err.code = 'EPERM'
+          throw err
+        }
+        return true
+      })
+
+      const result = await stopDaemon(pidFile)
+      expect(result.stopped).toBe(false)
+      expect(result.error).toContain('stale PID file removed')
+      expect(readPidFile(pidFile)).toBeNull()
+
+      vi.restoreAllMocks()
+    })
+
+    it('handles EPERM during polling (PID reuse after SIGTERM)', async () => {
+      const { writePidFile, stopDaemon, readPidFile } = await import('../core/daemon.js')
+      writePidFile(pidFile, process.pid)
+
+      let callCount = 0
+      vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
         if (signal === 'SIGTERM') return true
         if (signal === 0) {
+          callCount++
+          if (callCount <= 1) return true // alive on first poll
           const err = new Error('Operation not permitted') as NodeJS.ErrnoException
           err.code = 'EPERM'
           throw err

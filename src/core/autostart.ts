@@ -27,6 +27,7 @@ export function escapeSystemdValue(str: string): string {
   const escaped = str
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
+    .replace(/\$/g, '$$$$')
     .replace(/%/g, '%%')
   return `"${escaped}"`
 }

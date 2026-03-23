@@ -46,6 +46,7 @@ describe('autostart', () => {
       expect(escapeSystemdValue('/path"quote')).toBe('"/path\\"quote"')
       expect(escapeSystemdValue('/path\\back')).toBe('"/path\\\\back"')
       expect(escapeSystemdValue('/path%specifier')).toBe('"/path%%specifier"')
+      expect(escapeSystemdValue('/home/$USER/bin')).toBe('"/home/$$USER/bin"')
     })
   })
 

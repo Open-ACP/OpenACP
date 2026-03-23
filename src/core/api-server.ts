@@ -128,7 +128,17 @@ export class ApiServer {
 
     try {
       this.secret = fs.readFileSync(this.secretFilePath, 'utf-8').trim()
-      if (this.secret) return
+      if (this.secret) {
+        // Warn if file permissions are too open (like SSH does for private keys)
+        try {
+          const stat = fs.statSync(this.secretFilePath)
+          const mode = stat.mode & 0o777
+          if (mode & 0o077) {
+            log.warn({ path: this.secretFilePath, mode: '0' + mode.toString(8) }, 'API secret file has insecure permissions (should be 0600). Run: chmod 600 %s', this.secretFilePath)
+          }
+        } catch { /* stat failed, skip check */ }
+        return
+      }
     } catch {
       // File doesn't exist, create it
     }
@@ -142,7 +152,7 @@ export class ApiServer {
     if (!authHeader?.startsWith('Bearer ')) return false
     const token = authHeader.slice(7)
     if (token.length !== this.secret.length) return false
-    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(this.secret))
+    return crypto.timingSafeEqual(Buffer.from(token, 'utf-8'), Buffer.from(this.secret, 'utf-8'))
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

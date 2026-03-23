@@ -125,6 +125,10 @@ export async function stopDaemon(pidPath: string = DEFAULT_PID_PATH): Promise<{ 
     removePidFile(pidPath)
     return { stopped: false, error: 'Not running (stale PID file removed)' }
   }
+  if (status === 'eperm') {
+    removePidFile(pidPath)
+    return { stopped: false, error: 'PID belongs to another process (stale PID file removed)' }
+  }
 
   try {
     process.kill(pid, 'SIGTERM')
@@ -167,9 +171,7 @@ export async function stopDaemon(pidPath: string = DEFAULT_PID_PATH): Promise<{ 
   }
 
   // SIGKILL sent but process still alive after 1s — extremely rare (uninterruptible I/O).
-  // Clean up PID file anyway; the process will eventually exit.
-  removePidFile(pidPath)
-  return { stopped: true, pid }
+  return { stopped: false, pid, error: 'Process did not exit after SIGKILL (possible uninterruptible I/O). PID file retained.' }
 }
 
 export function getPidPath(): string {
