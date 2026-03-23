@@ -101,28 +101,77 @@ export function startDaemon(pidPath: string = DEFAULT_PID_PATH, logDir?: string)
   return { pid: child.pid }
 }
 
-export function stopDaemon(pidPath: string = DEFAULT_PID_PATH): { stopped: boolean; pid?: number; error?: string } {
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function isProcessAlive(pid: number): 'alive' | 'dead' | 'eperm' {
+  try {
+    process.kill(pid, 0)
+    return 'alive'
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException
+    if (err.code === 'EPERM') return 'eperm'
+    return 'dead'
+  }
+}
+
+export async function stopDaemon(pidPath: string = DEFAULT_PID_PATH): Promise<{ stopped: boolean; pid?: number; error?: string }> {
   const pid = readPidFile(pidPath)
   if (pid === null) return { stopped: false, error: 'Not running (no PID file)' }
 
-  try {
-    process.kill(pid, 0) // check alive
-  } catch {
+  const status = isProcessAlive(pid)
+  if (status === 'dead') {
     removePidFile(pidPath)
     return { stopped: false, error: 'Not running (stale PID file removed)' }
+  }
+  if (status === 'eperm') {
+    removePidFile(pidPath)
+    return { stopped: false, error: 'PID belongs to another process (stale PID file removed)' }
   }
 
   try {
     process.kill(pid, 'SIGTERM')
-    // Remove running marker so auto-start won't restart on next boot
-    clearRunning()
-    // PID file is cleaned up by the child process on SIGTERM (see main.ts shutdown handler).
-    // Also remove here in case child crashes before cleanup.
-    removePidFile(pidPath)
-    return { stopped: true, pid }
   } catch (e) {
     return { stopped: false, error: `Failed to stop: ${(e as Error).message}` }
   }
+
+  clearRunning()
+
+  const POLL_INTERVAL = 100
+  const TIMEOUT = 5000
+  const start = Date.now()
+
+  while (Date.now() - start < TIMEOUT) {
+    await sleep(POLL_INTERVAL)
+    const s = isProcessAlive(pid)
+    if (s === 'dead' || s === 'eperm') {
+      removePidFile(pidPath)
+      return { stopped: true, pid }
+    }
+  }
+
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException
+    if (err.code === 'EPERM') {
+      return { stopped: false, pid, error: 'PID may have been reused by another process. Run `openacp status` to verify, or manually delete the PID file.' }
+    }
+  }
+
+  const killStart = Date.now()
+  while (Date.now() - killStart < 1000) {
+    await sleep(POLL_INTERVAL)
+    const s = isProcessAlive(pid)
+    if (s === 'dead' || s === 'eperm') {
+      removePidFile(pidPath)
+      return { stopped: true, pid }
+    }
+  }
+
+  // SIGKILL sent but process still alive after 1s — extremely rare (uninterruptible I/O).
+  return { stopped: false, pid, error: 'Process did not exit after SIGKILL (possible uninterruptible I/O). PID file retained.' }
 }
 
 export function getPidPath(): string {

@@ -65,9 +65,22 @@ Config is saved to `~/.openacp/config.json`. Edit it anytime — see [Configurat
 6. System topics created in Telegram (Notifications + Assistant)
 7. Ready for messages
 
+## Running as a Daemon
+
+After setup, you can run OpenACP as a background service:
+
+```bash
+openacp start          # Start daemon
+openacp stop           # Stop daemon
+openacp status         # Check status
+openacp logs           # View logs
+```
+
+Or configure daemon mode as default via `openacp config` → Run Mode.
+
 ## Next Steps
 
 - [Telegram Setup](telegram-setup.md) — detailed bot & group configuration
-- [Usage Guide](usage.md) — commands, sessions, workspaces
-- [Configuration Reference](configuration.md) — all config options
+- [Usage Guide](usage.md) — CLI commands, runtime, sessions, workspaces
+- [Configuration Reference](configuration.md) — all config options including API and run mode
 - [Tunnel & File Viewer](tunnel.md) — shareable code viewer

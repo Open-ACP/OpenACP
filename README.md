@@ -78,6 +78,10 @@ OpenACP follows the [Agent Client Protocol (ACP)](https://agentclientprotocol.co
 - **Telegram** — Forum topics, real-time streaming, permission buttons, skill commands
 - **Tunnel & file viewer** — Public file/diff viewer via Cloudflare, ngrok, bore, or Tailscale
 - **Session persistence** — Resume sessions across restarts
+- **Daemon mode** — Background service with auto-start on boot
+- **CLI runtime** — Create and manage sessions from the terminal
+- **Config editor** — Interactive `openacp config` for all settings
+- **Setup wizard** — Interactive first-run setup with bot validation and auto-detect
 - **Plugin system** — Install channel adapters as npm packages
 - **Structured logging** — Pino with rotation, per-session log files
 - **Self-hosted** — Your keys, your data, your machine
@@ -134,8 +138,14 @@ openacp agents uninstall <name>   # Remove an installed agent
 openacp agents info <name>        # Show agent details & dependencies
 openacp agents refresh            # Force-refresh the registry
 
+# Runtime (requires running daemon)
+openacp runtime new [agent] [workspace]  # Create a new session
+openacp runtime cancel <id>              # Cancel a session
+openacp runtime status                   # Show active sessions
+openacp runtime agents                   # List available agents
+
 # System
-openacp config            # Show current config
+openacp config            # Interactive config editor
 openacp reset             # Re-run the setup wizard
 openacp update            # Update to latest version
 openacp install <plugin>  # Install a plugin (e.g. @openacp/adapter-discord)

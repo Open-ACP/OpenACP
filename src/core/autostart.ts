@@ -14,6 +14,24 @@ export function isAutoStartSupported(): boolean {
   return process.platform === 'darwin' || process.platform === 'linux'
 }
 
+export function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+export function escapeSystemdValue(str: string): string {
+  const escaped = str
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '$$$$')
+    .replace(/%/g, '%%')
+  return `"${escaped}"`
+}
+
 export function generateLaunchdPlist(nodePath: string, cliPath: string, logDir: string): string {
   const logFile = path.join(logDir, 'openacp.log')
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -24,8 +42,8 @@ export function generateLaunchdPlist(nodePath: string, cliPath: string, logDir: 
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${nodePath}</string>
-    <string>${cliPath}</string>
+    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(cliPath)}</string>
     <string>--daemon-child</string>
   </array>
   <key>RunAtLoad</key>
@@ -36,9 +54,9 @@ export function generateLaunchdPlist(nodePath: string, cliPath: string, logDir: 
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>${logFile}</string>
+  <string>${escapeXml(logFile)}</string>
   <key>StandardErrorPath</key>
-  <string>${logFile}</string>
+  <string>${escapeXml(logFile)}</string>
 </dict>
 </plist>
 `
@@ -49,7 +67,7 @@ export function generateSystemdUnit(nodePath: string, cliPath: string): string {
 Description=OpenACP Daemon
 
 [Service]
-ExecStart=${nodePath} ${cliPath} --daemon-child
+ExecStart=${escapeSystemdValue(nodePath)} ${escapeSystemdValue(cliPath)} --daemon-child
 Restart=on-failure
 
 [Install]

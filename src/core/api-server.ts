@@ -2,6 +2,7 @@ import * as http from 'node:http'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import * as crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { OpenACPCore } from './core.js'
 import type { TopicManager } from './topic-manager.js'
@@ -55,17 +56,22 @@ export class ApiServer {
   private actualPort: number = 0
   private portFilePath: string
   private startedAt = Date.now()
+  private secret: string = ''
+  private secretFilePath: string
 
   constructor(
     private core: OpenACPCore,
     private config: ApiConfig,
     portFilePath?: string,
     private topicManager?: TopicManager,
+    secretFilePath?: string,
   ) {
     this.portFilePath = portFilePath ?? DEFAULT_PORT_FILE
+    this.secretFilePath = secretFilePath ?? path.join(os.homedir(), '.openacp', 'api-secret')
   }
 
   async start(): Promise<void> {
+    this.loadOrCreateSecret()
     this.server = http.createServer((req, res) => this.handleRequest(req, res))
 
     await new Promise<void>((resolve, reject) => {
@@ -116,9 +122,48 @@ export class ApiServer {
     try { fs.unlinkSync(this.portFilePath) } catch { /* ignore */ }
   }
 
+  private loadOrCreateSecret(): void {
+    const dir = path.dirname(this.secretFilePath)
+    fs.mkdirSync(dir, { recursive: true })
+
+    try {
+      this.secret = fs.readFileSync(this.secretFilePath, 'utf-8').trim()
+      if (this.secret) {
+        // Warn if file permissions are too open (like SSH does for private keys)
+        try {
+          const stat = fs.statSync(this.secretFilePath)
+          const mode = stat.mode & 0o777
+          if (mode & 0o077) {
+            log.warn({ path: this.secretFilePath, mode: '0' + mode.toString(8) }, 'API secret file has insecure permissions (should be 0600). Run: chmod 600 %s', this.secretFilePath)
+          }
+        } catch { /* stat failed, skip check */ }
+        return
+      }
+    } catch {
+      // File doesn't exist, create it
+    }
+
+    this.secret = crypto.randomBytes(32).toString('hex')
+    fs.writeFileSync(this.secretFilePath, this.secret, { mode: 0o600 })
+  }
+
+  private authenticate(req: http.IncomingMessage): boolean {
+    const authHeader = req.headers.authorization
+    if (!authHeader?.startsWith('Bearer ')) return false
+    const token = authHeader.slice(7)
+    if (token.length !== this.secret.length) return false
+    return crypto.timingSafeEqual(Buffer.from(token, 'utf-8'), Buffer.from(this.secret, 'utf-8'))
+  }
+
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method?.toUpperCase()
     const url = req.url || ''
+
+    const isExempt = (method === 'GET' && (url === '/api/health' || url === '/api/version'))
+    if (!isExempt && !this.authenticate(req)) {
+      this.sendJson(res, 401, { error: 'Unauthorized' })
+      return
+    }
 
     try {
       if (method === 'POST' && url === '/api/sessions/adopt') {

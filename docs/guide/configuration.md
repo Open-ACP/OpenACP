@@ -44,6 +44,12 @@ Created by the setup wizard on first run. Edit manually anytime.
     "storeTtlMinutes": 60,
     "auth": { "enabled": false }
   },
+  "runMode": "daemon",
+  "autoStart": true,
+  "api": {
+    "port": 21420,
+    "host": "127.0.0.1"
+  },
   "logging": {
     "level": "info",
     "logDir": "~/.openacp/logs",
@@ -132,6 +138,33 @@ Old session logs are cleaned up automatically on startup.
 
 Sessions are stored in `~/.openacp/sessions.json` with debounced writes (2s). Enables [lazy resume](usage.md#session-persistence--resume) across restarts.
 
+## Run Mode
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `runMode` | `"foreground"` | `"foreground"` or `"daemon"` |
+| `autoStart` | `false` | Auto-start daemon on boot (macOS LaunchAgent) |
+
+## API
+
+Built-in HTTP API for programmatic session management. Used by `openacp runtime` commands.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `api.port` | `21420` | API server port |
+| `api.host` | `"127.0.0.1"` | API bind address (localhost only) |
+
+Port is written to `~/.openacp/api.port` for CLI discovery.
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/sessions` | Create session (`{ agent, workspace }`) |
+| `GET` | `/api/sessions` | List sessions |
+| `DELETE` | `/api/sessions/:id` | Cancel session |
+| `GET` | `/api/agents` | List agents |
+
 ## Environment Variables
 
 | Variable | Overrides |
@@ -145,6 +178,8 @@ Sessions are stored in `~/.openacp/sessions.json` with debounced writes (2s). En
 | `OPENACP_TUNNEL_PROVIDER` | `tunnel.provider` |
 | `OPENACP_LOG_LEVEL` | `logging.level` |
 | `OPENACP_LOG_DIR` | `logging.logDir` |
+| `OPENACP_RUN_MODE` | `runMode` |
+| `OPENACP_API_PORT` | `api.port` |
 | `OPENACP_DEBUG` | Set logging to debug level |
 
 ## Backward Compatibility

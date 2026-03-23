@@ -7,6 +7,7 @@ import * as net from 'node:net'
 describe('ApiServer', () => {
   let tmpDir: string
   let portFilePath: string
+  let secretFilePath: string
   let server: any
 
   const mockTopicManager = {
@@ -59,6 +60,7 @@ describe('ApiServer', () => {
     vi.clearAllMocks()
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-api-test-'))
     portFilePath = path.join(tmpDir, 'api.port')
+    secretFilePath = path.join(tmpDir, 'api-secret')
   })
 
   afterEach(async () => {
@@ -71,13 +73,22 @@ describe('ApiServer', () => {
 
   async function startServer(portOverride?: number) {
     const { ApiServer } = await import('../core/api-server.js')
-    server = new ApiServer(mockCore as any, { port: portOverride ?? 0, host: '127.0.0.1' }, portFilePath, mockTopicManager as any)
+    server = new ApiServer(mockCore as any, { port: portOverride ?? 0, host: '127.0.0.1' }, portFilePath, mockTopicManager as any, secretFilePath)
     await server.start()
     return server.getPort()
   }
 
+  function readTestSecret(): string {
+    return fs.readFileSync(secretFilePath, 'utf-8').trim()
+  }
+
   function apiFetch(port: number, urlPath: string, options?: RequestInit) {
-    return globalThis.fetch(`http://127.0.0.1:${port}${urlPath}`, options)
+    const token = fs.existsSync(secretFilePath) ? fs.readFileSync(secretFilePath, 'utf-8').trim() : ''
+    const headers = new Headers(options?.headers)
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+    return globalThis.fetch(`http://127.0.0.1:${port}${urlPath}`, { ...options, headers })
   }
 
   it('starts and writes port file', async () => {
@@ -660,5 +671,49 @@ describe('ApiServer', () => {
     const data2 = await res2.json() as any
     expect(data2.ok).toBe(true)
     expect(data2.needsRestart).toBe(true)
+  })
+
+  describe('authentication', () => {
+    it('returns 401 for requests without auth token', async () => {
+      const port = await startServer()
+      // Use raw fetch without auth
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/sessions`)
+      expect(res.status).toBe(401)
+      const data = await res.json()
+      expect(data.error).toBe('Unauthorized')
+    })
+
+    it('returns 401 for requests with wrong token', async () => {
+      const port = await startServer()
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/sessions`, {
+        headers: { Authorization: 'Bearer wrong-token' },
+      })
+      expect(res.status).toBe(401)
+    })
+
+    it('allows health endpoint without auth', async () => {
+      mockCore.sessionManager.listSessions.mockReturnValueOnce([])
+      mockCore.sessionManager.listRecords.mockReturnValueOnce([])
+      const port = await startServer()
+      // Use raw fetch without auth
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/health`)
+      expect(res.status).toBe(200)
+    })
+
+    it('allows version endpoint without auth', async () => {
+      const port = await startServer()
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/version`)
+      expect(res.status).toBe(200)
+    })
+
+    it('accepts requests with valid auth token', async () => {
+      mockCore.sessionManager.listSessions.mockReturnValueOnce([])
+      const port = await startServer()
+      const token = readTestSecret()
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/sessions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(res.status).toBe(200)
+    })
   })
 })
