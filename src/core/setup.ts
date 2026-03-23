@@ -437,15 +437,24 @@ export async function setupAgents(): Promise<{
   console.log(ok("Claude Agent ready"));
 
   const available = catalog.getAvailable();
+  const installed = available.filter((a) => a.installed);
   const installable = available.filter((a) => !a.installed && a.available);
 
-  // Offer additional agents
-  if (installable.length > 0) {
-    const choices = installable.slice(0, 10).map((a) => ({
-      name: `${a.name} (${a.distribution})`,
-      value: a.key,
-      checked: false,
-    }));
+  // Offer agent selection — show installed agents as pre-checked + disabled
+  if (installed.length > 0 || installable.length > 0) {
+    const choices = [
+      ...installed.map((a) => ({
+        name: `${a.name} (installed)`,
+        value: a.key,
+        checked: true,
+        disabled: "(already installed)",
+      })),
+      ...installable.slice(0, 10).map((a) => ({
+        name: `${a.name} (${a.distribution})`,
+        value: a.key,
+        checked: false,
+      })),
+    ];
 
     const selected = await checkbox({
       message: "Install additional agents? (Space to select, Enter to continue)",

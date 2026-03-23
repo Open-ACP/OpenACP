@@ -230,6 +230,21 @@ async function installAgentWithProgress(ctx: Context, core: OpenACPCore, nameOrI
 
   const result = await catalog.install(nameOrId, progress);
 
+  // Auto-integrate handoff if agent supports it
+  if (result.ok) {
+    const { getAgentCapabilities } = await import("../../../core/agent-dependencies.js");
+    const caps = getAgentCapabilities(result.agentKey);
+    if (caps.integration) {
+      const { installIntegration } = await import("../../../cli/integrate.js");
+      const intResult = await installIntegration(result.agentKey, caps.integration);
+      if (intResult.success) {
+        try {
+          await ctx.reply(`🔗 Handoff integration installed for <b>${escapeHtml(result.agentKey)}</b>`, { parse_mode: "HTML" });
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
   // Show setup steps as a follow-up message with copyable commands
   if (result.ok && result.setupSteps?.length) {
     let setupText = `📋 <b>Setup for ${escapeHtml(result.agentKey)}:</b>\n\n`;

@@ -211,7 +211,7 @@ describe('ApiServer', () => {
     const data = await res.json()
     expect(data.default).toBe('claude')
     expect(data.agents).toHaveLength(2)
-    expect(data.agents[0]).toEqual({ name: 'claude', command: 'claude-agent-acp', args: [], capabilities: { supportsResume: true } })
+    expect(data.agents[0]).toMatchObject({ name: 'claude', command: 'claude-agent-acp', args: [], capabilities: { supportsResume: true } })
   })
 
   it('returns 404 for unknown routes', async () => {

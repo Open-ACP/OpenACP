@@ -718,7 +718,15 @@ Shows the version of the currently running daemon process.
       console.log(`Daemon version: ${data.version}`)
 
     } else {
+      const { suggestMatch } = await import('./suggest.js')
+      const apiSubcommands = [
+        'new', 'cancel', 'status', 'agents', 'topics', 'delete-topic',
+        'cleanup', 'send', 'session', 'dangerous', 'health', 'restart',
+        'config', 'adapters', 'tunnel', 'notify', 'version',
+      ]
+      const suggestion = suggestMatch(subCmd ?? '', apiSubcommands)
       console.error(`Unknown api command: ${subCmd || '(none)'}\n`)
+      if (suggestion) console.error(`Did you mean: ${suggestion}?\n`)
       printApiHelp()
       process.exit(1)
     }
@@ -901,6 +909,18 @@ the API for live updates. When stopped, edits config file directly.
     const configValue = args[3]
     if (!configPath || configValue === undefined) {
       console.error('Usage: openacp config set <path> <value>')
+      process.exit(1)
+    }
+
+    // Validate top-level config key
+    const { ConfigSchema } = await import('../core/config.js')
+    const topLevelKey = configPath.split('.')[0]
+    const validConfigKeys = Object.keys(ConfigSchema.shape)
+    if (!validConfigKeys.includes(topLevelKey)) {
+      const { suggestMatch } = await import('./suggest.js')
+      const suggestion = suggestMatch(topLevelKey, validConfigKeys)
+      console.error(`Unknown config key: ${topLevelKey}`)
+      if (suggestion) console.error(`Did you mean: ${suggestion}?`)
       process.exit(1)
     }
 
@@ -1156,8 +1176,12 @@ a "Handoff" slash command to Claude Code.
 
   const integration = getIntegration(agent);
   if (!integration) {
+    const { suggestMatch } = await import('./suggest.js');
+    const available = listIntegrations();
+    const suggestion = suggestMatch(agent, available);
     console.log(`No integration available for '${agent}'.`);
-    console.log(`Available: ${listIntegrations().join(", ")}`);
+    if (suggestion) console.log(`Did you mean: ${suggestion}?`);
+    console.log(`Available: ${available.join(", ")}`);
     process.exit(1);
   }
 
@@ -1204,6 +1228,21 @@ Fixable issues can be auto-repaired when not using --dry-run.
 `)
     return
   }
+
+  const knownFlags = ["--dry-run"];
+  const unknownFlags = args.slice(1).filter(
+    (a) => a.startsWith("--") && !knownFlags.includes(a),
+  );
+  if (unknownFlags.length > 0) {
+    const { suggestMatch } = await import('./suggest.js');
+    for (const flag of unknownFlags) {
+      const suggestion = suggestMatch(flag, knownFlags);
+      console.error(`Unknown flag: ${flag}`);
+      if (suggestion) console.error(`Did you mean: ${suggestion}?`);
+    }
+    process.exit(1);
+  }
+
   const dryRun = args.includes("--dry-run");
   const { DoctorEngine } = await import("../core/doctor/index.js");
   const engine = new DoctorEngine({ dryRun });
@@ -1309,8 +1348,18 @@ bypassing the normal staleness check.
       return agentsInfo(args[2], wantsHelp(args));
     case "run":
       return agentsRun(args[2], args.slice(3), wantsHelp(args));
-    default:
+    case "list":
+    case undefined:
       return agentsList();
+    default: {
+      const { suggestMatch } = await import('./suggest.js');
+      const agentSubcommands = ["install", "uninstall", "refresh", "info", "run", "list"];
+      const suggestion = suggestMatch(subcommand, agentSubcommands);
+      console.error(`Unknown agents command: ${subcommand}`);
+      if (suggestion) console.error(`Did you mean: ${suggestion}?`);
+      console.error(`\nRun 'openacp agents' to see available agents.`);
+      process.exit(1);
+    }
   }
 }
 
@@ -1417,7 +1466,26 @@ Run 'openacp agents' to see available agents.
 
   const result = await catalog.install(nameOrId, progress, force);
   if (!result.ok) {
+    if (result.error?.includes('not found')) {
+      const { suggestMatch } = await import('./suggest.js');
+      const allKeys = catalog.getAvailable().map((a) => a.key);
+      const suggestion = suggestMatch(nameOrId, allKeys);
+      if (suggestion) console.log(`  Did you mean: ${suggestion}?`);
+    }
     process.exit(1);
+  }
+
+  // Auto-integrate handoff if agent supports it
+  const { getAgentCapabilities } = await import("../core/agent-dependencies.js");
+  const caps = getAgentCapabilities(result.agentKey);
+  if (caps.integration) {
+    const { installIntegration } = await import("./integrate.js");
+    const intResult = await installIntegration(result.agentKey, caps.integration);
+    if (intResult.success) {
+      console.log(`  \x1b[32m✓\x1b[0m Handoff integration installed for ${result.agentKey}`);
+    } else {
+      console.log(`  \x1b[33m⚠ Handoff integration failed: ${intResult.logs[intResult.logs.length - 1] ?? "unknown error"}\x1b[0m`);
+    }
   }
 
   // Show setup steps if any
@@ -1453,9 +1521,24 @@ async function agentsUninstall(name: string | undefined, help = false): Promise<
 
   const result = await catalog.uninstall(name);
   if (result.ok) {
+    // Auto-uninstall handoff integration if exists
+    const { getAgentCapabilities } = await import("../core/agent-dependencies.js");
+    const caps = getAgentCapabilities(name);
+    if (caps.integration) {
+      const { uninstallIntegration } = await import("./integrate.js");
+      await uninstallIntegration(name, caps.integration);
+      console.log(`  \x1b[32m✓\x1b[0m Handoff integration removed for ${name}`);
+    }
     console.log(`\n  \x1b[32m✓ ${name} removed.\x1b[0m\n`);
   } else {
-    console.log(`\n  \x1b[31m✗ ${result.error}\x1b[0m\n`);
+    console.log(`\n  \x1b[31m✗ ${result.error}\x1b[0m`);
+    if (result.error?.includes('not installed')) {
+      const { suggestMatch } = await import('./suggest.js');
+      const installedKeys = Object.keys(catalog.getInstalledEntries());
+      const suggestion = suggestMatch(name, installedKeys);
+      if (suggestion) console.log(`  Did you mean: ${suggestion}?`);
+    }
+    console.log();
   }
 }
 
@@ -1540,7 +1623,12 @@ whether the agent is installed or available from the registry.
     return;
   }
 
-  console.log(`\n  \x1b[31m"${nameOrId}" not found.\x1b[0m Run 'openacp agents' to see available agents.\n`);
+  const { suggestMatch } = await import('./suggest.js');
+  const allKeys = catalog.getAvailable().map((a) => a.key);
+  const suggestion = suggestMatch(nameOrId, allKeys);
+  console.log(`\n  \x1b[31m"${nameOrId}" not found.\x1b[0m`);
+  if (suggestion) console.log(`  Did you mean: ${suggestion}?`);
+  console.log(`  Run 'openacp agents' to see available agents.\n`);
 }
 
 async function agentsRun(nameOrId: string | undefined, extraArgs: string[], help = false): Promise<void> {
@@ -1572,8 +1660,16 @@ ACP-specific flags are automatically stripped.
 
   const installed = catalog.getInstalledAgent(nameOrId);
   if (!installed) {
+    const { suggestMatch } = await import('./suggest.js');
+    const installedKeys = Object.keys(catalog.getInstalledEntries());
+    const suggestion = suggestMatch(nameOrId, installedKeys);
     console.log(`\n  \x1b[31m"${nameOrId}" is not installed.\x1b[0m`);
-    console.log(`  Install first: openacp agents install ${nameOrId}\n`);
+    if (suggestion) {
+      console.log(`  Did you mean: ${suggestion}?`);
+      console.log(`  Install first: openacp agents install ${suggestion}\n`);
+    } else {
+      console.log(`  Install first: openacp agents install ${nameOrId}\n`);
+    }
     return;
   }
 
@@ -1616,7 +1712,14 @@ export async function cmdDefault(command: string | undefined): Promise<void> {
 
   // Reject unknown commands
   if (command && !command.startsWith('-')) {
+    const { suggestMatch } = await import('./suggest.js')
+    const topLevelCommands = [
+      'start', 'stop', 'status', 'logs', 'config', 'reset', 'update',
+      'install', 'uninstall', 'plugins', 'api', 'adopt', 'integrate', 'doctor', 'agents',
+    ]
+    const suggestion = suggestMatch(command, topLevelCommands)
     console.error(`Unknown command: ${command}`)
+    if (suggestion) console.error(`Did you mean: ${suggestion}?`)
     printHelp()
     process.exit(1)
   }
